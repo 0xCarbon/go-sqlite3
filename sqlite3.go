@@ -441,6 +441,12 @@ const (
 type SQLiteDriver struct {
 	Extensions  []string
 	ConnectHook func(*SQLiteConn) error
+
+	// EncryptionKey sets the SQLCipher PRAGMA key as the very first SQL
+	// statement after sqlite3_open_v2(), before any other pragmas.
+	// Required for opening SQLCipher-encrypted databases. If empty, no
+	// PRAGMA key is executed (plain SQLite behavior).
+	EncryptionKey string
 }
 
 // SQLiteConn implements driver.Conn.
@@ -1597,6 +1603,16 @@ func (d *SQLiteDriver) Open(dsn string) (driver.Conn, error) {
 			return lastError(db)
 		}
 		return nil
+	}
+
+	// SQLCipher: set encryption key as the FIRST statement after sqlite3_open_v2().
+	// Must precede all other pragmas — SQLCipher requires the key before any
+	// database access, including PRAGMA busy_timeout.
+	if d.EncryptionKey != "" {
+		if err := exec(fmt.Sprintf("PRAGMA key = '%s';", d.EncryptionKey)); err != nil {
+			C.sqlite3_close_v2(db)
+			return nil, err
+		}
 	}
 
 	// Busy timeout
