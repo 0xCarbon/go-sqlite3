@@ -1,4 +1,3 @@
-#ifndef USE_LIBSQLITE3
 /*
 ** 2001-09-15
 **
@@ -149,7 +148,7 @@ extern "C" {
 */
 #define SQLITE_VERSION        "3.51.3"
 #define SQLITE_VERSION_NUMBER 3051003
-#define SQLITE_SOURCE_ID      "2026-03-13 10:38:09 737ae4a34738ffa0c3ff7f9bb18df914dd1cad163f28fd6b6e114a344fe6d618"
+#define SQLITE_SOURCE_ID      "2026-03-13 10:38:09 737ae4a34738ffa0c3ff7f9bb18df914dd1cad163f28fd6b6e114a344fe6alt1"
 #define SQLITE_SCM_BRANCH     "branch-3.51"
 #define SQLITE_SCM_TAGS       "release version-3.51.3"
 #define SQLITE_SCM_DATETIME   "2026-03-13T10:38:09.694Z"
@@ -6660,6 +6659,66 @@ SQLITE_API int sqlite3_collation_needed16(
   void*,
   void(*)(void*,sqlite3*,int eTextRep,const void*)
 );
+
+/* BEGIN SQLCIPHER */
+#ifdef SQLITE_HAS_CODEC
+/*
+** Specify the key for an encrypted database.  This routine should be
+** called right after sqlite3_open().
+**
+** The code to implement this API is not available in the public release
+** of SQLite.
+*/
+SQLITE_API int sqlite3_key(
+  sqlite3 *db,                   /* Database to be rekeyed */
+  const void *pKey, int nKey     /* The key */
+);
+SQLITE_API int sqlite3_key_v2(
+  sqlite3 *db,                   /* Database to be rekeyed */
+  const char *zDbName,           /* Name of the database */
+  const void *pKey, int nKey     /* The key */
+);
+
+/*
+** Change the key on an open database.  If the current database is not
+** encrypted, this routine will encrypt it.  If pNew==0 or nNew==0, the
+** database is decrypted.
+**
+** The code to implement this API is not available in the public release
+** of SQLite.
+*/
+/* SQLCipher usage note:
+
+   If the current database is plaintext SQLCipher will NOT encrypt it.
+   If the current database is encrypted and pNew==0 or nNew==0, SQLCipher
+   will NOT decrypt it.
+
+   This routine will ONLY work on an already encrypted database in order
+   to change the key.
+
+   Conversion from plaintext-to-encrypted or encrypted-to-plaintext should
+   use an ATTACHed database and the sqlcipher_export() convenience function
+   as per the SQLCipher Documentation.
+*/
+SQLITE_API int sqlite3_rekey(
+  sqlite3 *db,                   /* Database to be rekeyed */
+  const void *pKey, int nKey     /* The new key */
+);
+SQLITE_API int sqlite3_rekey_v2(
+  sqlite3 *db,                   /* Database to be rekeyed */
+  const char *zDbName,           /* Name of the database */
+  const void *pKey, int nKey     /* The new key */
+);
+
+/*
+** Specify the activation key for a SEE database.  Unless
+** activated, none of the SEE routines will work.
+*/
+SQLITE_API void sqlite3_activate_see(
+  const char *zPassPhrase        /* Activation phrase */
+);
+#endif
+/* END SQLCIPHER */
 
 #ifdef SQLITE_ENABLE_CEROD
 /*
@@ -13967,7 +14026,3 @@ struct fts5_api {
 
 /******** End of fts5.h *********/
 #endif /* SQLITE3_H */
-#else // USE_LIBSQLITE3
- // If users really want to link against the system sqlite3 we
-// need to make this file a noop.
- #endif
