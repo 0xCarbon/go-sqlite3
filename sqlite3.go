@@ -11,6 +11,14 @@ package sqlite3
 
 /*
 #cgo CFLAGS: -std=gnu99
+#cgo CFLAGS: -DSQLITE_HAS_CODEC
+#cgo CFLAGS: -DSQLCIPHER_CRYPTO_OPENSSL
+#cgo CFLAGS: -DSQLITE_TEMP_STORE=2
+#cgo CFLAGS: -DSQLITE_EXTRA_INIT=sqlcipher_extra_init
+#cgo CFLAGS: -DSQLITE_EXTRA_SHUTDOWN=sqlcipher_extra_shutdown
+#cgo CFLAGS: -include stdint.h
+#cgo linux CFLAGS: -D_GNU_SOURCE
+#cgo LDFLAGS: -lcrypto
 #cgo CFLAGS: -DSQLITE_ENABLE_RTREE
 #cgo CFLAGS: -DSQLITE_THREADSAFE=1
 #cgo CFLAGS: -DHAVE_USLEEP=1
@@ -1609,7 +1617,7 @@ func (d *SQLiteDriver) Open(dsn string) (driver.Conn, error) {
 	// Must precede all other pragmas — SQLCipher requires the key before any
 	// database access, including PRAGMA busy_timeout.
 	if d.EncryptionKey != "" {
-		if err := exec(fmt.Sprintf("PRAGMA key = '%s';", d.EncryptionKey)); err != nil {
+		if err := exec(fmt.Sprintf("PRAGMA key = %s;", d.EncryptionKey)); err != nil {
 			C.sqlite3_close_v2(db)
 			return nil, err
 		}
