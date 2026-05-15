@@ -298,6 +298,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -455,6 +456,14 @@ type SQLiteDriver struct {
 	// Required for opening SQLCipher-encrypted databases. If empty, no
 	// PRAGMA key is executed (plain SQLite behavior).
 	EncryptionKey string
+
+	// EncryptionKeyBytes sets the SQLCipher PRAGMA key from raw bytes.
+	// The driver hex-encodes the key internally and zeroizes the
+	// intermediate PRAGMA buffer after each connection open. Takes
+	// precedence over EncryptionKey when non-nil. The caller retains
+	// ownership of the slice and must not modify it while connections
+	// may be opened; zero it after closing the *sql.DB.
+	EncryptionKeyBytes []byte
 }
 
 // SQLiteConn implements driver.Conn.
@@ -1616,7 +1625,28 @@ func (d *SQLiteDriver) Open(dsn string) (driver.Conn, error) {
 	// SQLCipher: set encryption key as the FIRST statement after sqlite3_open_v2().
 	// Must precede all other pragmas — SQLCipher requires the key before any
 	// database access, including PRAGMA busy_timeout.
-	if d.EncryptionKey != "" {
+	// EncryptionKeyBytes takes precedence — it builds the PRAGMA in a mutable
+	// buffer that is zeroized after use, avoiding immutable Go string copies.
+	switch {
+	case len(d.EncryptionKeyBytes) > 0:
+		const prefix = "PRAGMA key = \"x'"
+		const suffix = "'\";"
+		buf := make([]byte, len(prefix)+hex.EncodedLen(len(d.EncryptionKeyBytes))+len(suffix)+1)
+		copy(buf, prefix)
+		hex.Encode(buf[len(prefix):], d.EncryptionKeyBytes)
+		copy(buf[len(prefix)+hex.EncodedLen(len(d.EncryptionKeyBytes)):], suffix)
+
+		rv := C.sqlite3_exec(db, (*C.char)(unsafe.Pointer(&buf[0])), nil, nil, nil)
+		runtime.KeepAlive(buf)
+		for i := range buf {
+			buf[i] = 0
+		}
+
+		if rv != C.SQLITE_OK {
+			C.sqlite3_close_v2(db)
+			return nil, lastError(db)
+		}
+	case d.EncryptionKey != "":
 		if err := exec(fmt.Sprintf("PRAGMA key = %s;", d.EncryptionKey)); err != nil {
 			C.sqlite3_close_v2(db)
 			return nil, err
