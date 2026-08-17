@@ -22,6 +22,12 @@ set -e
 
 cd "$(dirname "$0")/.."
 
+# Source of truth for the amalgamation: 0xCarbon/sqlcipher, this org's
+# vendored mirror of sqlcipher/sqlcipher (supply-chain control). Versions
+# are discovered from upstream's tags; the SOURCE is cloned from the mirror.
+SOURCE_REPO=https://github.com/0xCarbon/sqlcipher
+VERSION_REPO=https://github.com/sqlcipher/sqlcipher
+
 if [ -n "$1" ]; then
   # Accept both 4.17.0 and v4.17.0.
   VERSION="v${1#v}"
@@ -29,7 +35,7 @@ else
   # --refs: without it the peeled annotated-tag refs (refs/tags/vX.Y.Z^{})
   # match the glob and version-sort above the plain tags.
   VERSION=$(git ls-remote --tags --refs --sort=-v:refname \
-    https://github.com/sqlcipher/sqlcipher 'v4.*' |
+    "$VERSION_REPO" 'v4.*' |
     head -n 1 | sed 's|.*refs/tags/||')
 fi
 
@@ -48,11 +54,12 @@ fi
 
 echo "Bundling SQLCipher $VERSION (currently ${CURRENT:-none})"
 
-# Pinned commits per release tag (the commit the annotated tag points at).
-# A tag is a mutable ref: the clone is verified to land exactly on the
-# pinned commit, so a retagged release cannot serve different source. When
-# bundling a new version, add its pin here first (after cloning the tag,
-# git -C <dir> rev-parse HEAD).
+# Pinned commits per release — the upstream commit the annotated tag points
+# at (identical in the mirror). The clone is verified to land exactly on the
+# pinned commit, so a moved mirror branch or a retagged release cannot serve
+# different source. When bundling a new version, advance the mirror
+# (0xCarbon/sqlcipher) to the release commit, then add its pin here (after
+# cloning, git -C <dir> rev-parse HEAD).
 #
 # Deliberately an explicit case table, not an indirect variable lookup:
 # the version string arrives from git ls-remote auto-discovery or argv,
@@ -71,8 +78,10 @@ fi
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
-git clone --quiet --branch "$VERSION" --depth 1 \
-  https://github.com/sqlcipher/sqlcipher "$WORK/sqlcipher"
+# The mirror carries no tags: clone the default branch and check out the
+# pinned commit explicitly.
+git clone --quiet "$SOURCE_REPO" "$WORK/sqlcipher"
+git -C "$WORK/sqlcipher" checkout --quiet --detach "$PIN"
 
 CLONED=$(git -C "$WORK/sqlcipher" rev-parse HEAD)
 if [ "$CLONED" != "$PIN" ]; then
