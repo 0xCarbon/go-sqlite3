@@ -42,14 +42,18 @@ Keys are configured per driver or per DSN, in this precedence order:
 
 - `SQLiteDriver.EncryptionKeyBytes []byte` — raw key; the driver hex-encodes it
   into a zeroized mutable `PRAGMA key = "x'...'"` buffer (key derivation is
-  skipped for raw keys).
+  skipped for raw keys). SQLCipher only honors the raw form for exactly 32
+  bytes, or 48/80 bytes with salt; other lengths are rejected.
 - `SQLiteDriver.EncryptionKey string` — interpolated into `PRAGMA key` as-is;
   pass a SQL-literal value such as `"x'0123...'"` or a passphrase literal.
 - `_key=<hex>` DSN parameter — raw key for DSNs opened through the globally
   registered driver; invalid or empty values fail the open.
 
 The key runs as the first statement after `sqlite3_open_v2`, before all other
-pragmas. Keyed opens verify `PRAGMA cipher_version` and fail loudly when the
+pragmas. Note that `_key` DSN values and `EncryptionKey` strings are immutable
+Go strings held by the caller and cannot be scrubbed from process memory;
+prefer `EncryptionKeyBytes` for sensitive keys (the driver wipes its own
+buffers, including the C copies). Keyed opens verify `PRAGMA cipher_version` and fail loudly when the
 linked build has no codec (for example `-tags libsqlite3` against a plain
 system libsqlite3) instead of silently operating unencrypted.
 
@@ -153,11 +157,11 @@ Boolean values can be one of:
 | Busy Timeout | `_busy_timeout` \| `_timeout` | `int` | Specify value for sqlite3_busy_timeout. For more information see [PRAGMA busy_timeout](https://www.sqlite.org/pragma.html#pragma_busy_timeout) |
 | Case Sensitive LIKE | `_case_sensitive_like` \| `_cslike` | `boolean` | For more information see [PRAGMA case_sensitive_like](https://www.sqlite.org/pragma.html#pragma_case_sensitive_like) |
 | Defer Foreign Keys | `_defer_foreign_keys` \| `_defer_fk` | `boolean` | For more information see [PRAGMA defer_foreign_keys](https://www.sqlite.org/pragma.html#pragma_defer_foreign_keys) |
+| Encryption Key | `_key` | `hex string` | 0xCarbon fork: raw SQLCipher key, hex-encoded; must decode to 32, 48 or 80 bytes (`PRAGMA key = "x'...'"` form, key derivation skipped). Lower precedence than the `EncryptionKeyBytes`/`EncryptionKey` driver fields. Invalid, empty or duplicate values fail the open. Keys embedded in the DSN cannot be scrubbed from memory; prefer `EncryptionKeyBytes` for sensitive keys. |
 | Foreign Keys | `_foreign_keys` \| `_fk` | `boolean` | For more information see [PRAGMA foreign_keys](https://www.sqlite.org/pragma.html#pragma_foreign_keys) |
 | Ignore CHECK Constraints | `_ignore_check_constraints` | `boolean` | For more information see [PRAGMA ignore_check_constraints](https://www.sqlite.org/pragma.html#pragma_ignore_check_constraints) |
 | Immutable | `immutable` | `boolean` | For more information see [Immutable](https://www.sqlite.org/c3ref/open.html) |
 | Journal Mode | `_journal_mode` \| `_journal` | <ul><li>DELETE</li><li>TRUNCATE</li><li>PERSIST</li><li>MEMORY</li><li>WAL</li><li>OFF</li></ul> | For more information see [PRAGMA journal_mode](https://www.sqlite.org/pragma.html#pragma_journal_mode) |
-| Encryption Key | `_key` | `hex string` | 0xCarbon fork: raw SQLCipher key, hex-encoded (`PRAGMA key = "x'...'"` form, key derivation skipped). Lower precedence than the `EncryptionKeyBytes`/`EncryptionKey` driver fields. Invalid or empty values fail the open. |
 | Locking Mode | `_locking_mode` \| `_locking` | <ul><li>NORMAL</li><li>EXCLUSIVE</li></ul> | For more information see [PRAGMA locking_mode](https://www.sqlite.org/pragma.html#pragma_locking_mode) |
 | Mode | `mode` | <ul><li>ro</li><li>rw</li><li>rwc</li><li>memory</li></ul> | Access Mode of the database. For more information see [SQLite Open](https://www.sqlite.org/c3ref/open.html) |
 | Mutex Locking | `_mutex` | <ul><li>no</li><li>full</li></ul> | Specify mutex mode. |
