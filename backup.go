@@ -25,6 +25,13 @@ type SQLiteBackup struct {
 }
 
 // Backup make backup from src to dest.
+//
+// SQLCipher note: source and destination must be keyed identically when
+// encrypted — SQLite refuses mixed-codec backups at init ("backup is not
+// supported with encrypted databases"), and a plain destination cannot
+// receive encrypted pages. To decrypt or rekey, use ATTACH with a raw-key
+// string and sqlcipher_export instead. After Close, Step returns
+// Error{Code: ErrMisuse} and Remaining/PageCount return 0.
 func (destConn *SQLiteConn) Backup(dest string, srcConn *SQLiteConn, src string) (*SQLiteBackup, error) {
 	destptr := C.CString(dest)
 	defer C.free(unsafe.Pointer(destptr))

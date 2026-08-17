@@ -70,6 +70,61 @@ encryption then requires a SQLCipher build of that system library.
 The canonical branch for fork work is `master`; `feat/sqlcipher-encryption-key`
 is frozen history that `master` already contains.
 
+### Opening encrypted databases: rules and caveats
+
+- **Key before open, not after.** The key must be known at open time
+  (`EncryptionKeyBytes`/`EncryptionKey`/`_key`). Opening an existing encrypted
+  database and then issuing `PRAGMA key` yourself is unsupported: the driver
+  applies setup pragmas at open (notably `PRAGMA synchronous`, which reads
+  page 1) and SQLCipher fails the open with `SQLITE_NOTADB` before your
+  statement runs. The same mechanism is what makes a *wrong* driver-level key
+  fail fast at `Ping` instead of poisoning the pool with unusable connections.
+- **`cache=shared` keys once per pager.** In shared-cache mode the codec
+  belongs to the shared pager: every connection in the pool must use the same
+  key, and wrong-key detection covers only the first opener. Later
+  connections with a different key silently join under the first key.
+- **`ATTACH ... KEY` needs the quoted raw-key string.** SQLCipher only treats
+  `x'<hex>'` as a raw key when it arrives as text: use
+  `ATTACH DATABASE ? AS x KEY ?` binding `"x'<hex>'"` (as `sqlcipher_export`
+  flows in the wild do). A bare blob literal `KEY x'<hex>'` silently runs key
+  derivation over the literal bytes.
+- **Passphrases must be quoted SQL literals.** `EncryptionKey` is interpolated
+  as-is into `PRAGMA key = <value>;`: pass `"'my pass phrase '"`-style quoted
+  values, and never user input (values containing `;` would execute as
+  multiple statements).
+- **`Serialize()` returns plaintext.** On a keyed connection `Serialize()`
+  returns the fully decrypted database image (and `Deserialize()` writes to
+  the in-memory image, not the encrypted file). Handle serialized bytes as
+  plaintext.
+- **Never set `PRAGMA temp_store=FILE` on keyed databases.** SQLCipher does
+  not encrypt sorter/temp spill files; the build default
+  (`SQLITE_TEMP_STORE=2`, memory) keeps them off disk at the cost of the RSS
+  ceiling below.
+
+### Performance characteristics
+
+Measured on Linux/amd64 (see `sqlite3_encryption_bench_test.go`):
+
+| Operation | Plain | Keyed (32-byte raw key) |
+|---|---|---|
+| Open+Close | ~49µs | ~83µs (1.7×) |
+| Open+Close, WAL + busy_timeout | ~128µs | ~188µs |
+| Writes (WAL, 256B rows) | 1× | +56% |
+| Reads, warm page cache | 1× | parity |
+| Reads, cold page cache | 1× | +158% |
+| Statement-cache hit (warm) | 1× | parity |
+
+- **Passphrase keys cost ~0.2–0.4 s per open**: SQLCipher runs
+  PBKDF2-HMAC-SHA512 with 256,000 iterations on every connection. Use raw
+  keys (`EncryptionKeyBytes`/`_key`) under load; the driver rejects raw-key
+  lengths other than 32/48/80 bytes precisely because anything else would
+  silently take this slow, derived path.
+- **`SQLITE_TEMP_STORE=2` trade-off**: large sorts and index builds stay in
+  memory instead of spilling to (plaintext) temp files — size memory-limited
+  containers for worst-case sort volumes.
+- Every `PRAGMA` pays a small fixed overhead (~0.2µs) from SQLCipher's
+  pragma hook; irrelevant except in pragma-heavy micro-loops.
+
 This package follows the official [Golang Release Policy](https://golang.org/doc/devel/release.html#policy).
 
 ### Overview
