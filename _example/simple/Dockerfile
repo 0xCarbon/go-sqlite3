@@ -30,8 +30,8 @@ COPY . /workspace/
 
 RUN \
     cd _example/simple && \
-    go mod init github.com/mattn/sample && \
-    go mod edit -replace=github.com/mattn/go-sqlite3=../.. && \
+    go mod init github.com/0xcarbon/sample && \
+    go mod edit -replace=github.com/0xCarbon/go-sqlite3=../.. && \
     go mod tidy && \
     go install -ldflags='-s -w -extldflags "-static"' ./simple.go
 
