@@ -1226,10 +1226,20 @@ func (c *SQLiteConn) begin(ctx context.Context) (driver.Tx, error) {
 //	  and EncryptionKey driver fields. Invalid, empty or duplicate values
 //	  fail the open.
 //
+// isKeyParamName reports whether a decoded DSN parameter name is a spelling
+// of the _key parameter: case-insensitive, ending in "_key" (covers _KEY,
+// %5Fkey, and "?_key"-style separator typos).
+func isKeyParamName(name string) bool {
+	return strings.HasSuffix(strings.ToLower(name), "_key")
+}
+
 // stripKeyParam removes the _key segment from a raw DSN query string while
 // preserving every other byte (no URL re-encoding; url.Values.Encode could
 // mutate other parameters' encoding). Open rejects duplicate _key values
-// before calling this, so at most one segment is removed.
+// before calling this, so at most one segment is removed. Name matching
+// mirrors isKeyParamName (case-insensitive, any "_key"-suffixed spelling —
+// Open already accepted it as the key), so the raw-key hex never stays in
+// the filename handed to sqlite3_open_v2.
 func stripKeyParam(query string) string {
 	segs := strings.Split(query, "&")
 	kept := make([]string, 0, len(segs))
@@ -1238,11 +1248,7 @@ func stripKeyParam(query string) string {
 		if i := strings.IndexByte(seg, '='); i >= 0 {
 			name = seg[:i]
 		}
-		// Open inspects parameters through url.ParseQuery, which decodes
-		// names before use: %5Fkey (and any other spelling of _key) must
-		// be stripped too, or the raw-key hex stays in the filename
-		// handed to sqlite3_open_v2.
-		if dec, err := url.QueryUnescape(name); err == nil && dec == "_key" {
+		if dec, err := url.QueryUnescape(name); err == nil && isKeyParamName(dec) {
 			continue
 		}
 		kept = append(kept, seg)
@@ -1299,11 +1305,24 @@ func (d *SQLiteDriver) Open(dsn string) (driver.Conn, error) {
 		// precedence than the EncryptionKeyBytes and EncryptionKey driver
 		// fields. Invalid, empty or duplicate values error instead of being
 		// silently dropped.
-		if vals, ok := params["_key"]; ok {
-			if len(vals) > 1 {
-				return nil, errors.New("Invalid _key: duplicate values")
+		//
+		// Parameter-name matching is case-insensitive and accepts any
+		// spelling whose decoded name ends in "_key" (_KEY, %5Fkey,
+		// "?_key" after a doubled "?"): a misspelling that silently fell
+		// through to an unencrypted open would leak the key into the
+		// filename/URI and defeat the codec-refusal guarantee. Duplicate
+		// values across spellings are rejected.
+		var keyVals []string
+		for name, vals := range params {
+			if isKeyParamName(name) {
+				keyVals = append(keyVals, vals...)
 			}
-			val := vals[0]
+		}
+		if len(keyVals) > 1 {
+			return nil, errors.New("Invalid _key: duplicate values")
+		}
+		if len(keyVals) == 1 {
+			val := keyVals[0]
 			if val == "" {
 				return nil, errors.New("Invalid _key: empty value")
 			}

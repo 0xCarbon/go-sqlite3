@@ -501,8 +501,9 @@ func TestStripKeyParam(t *testing.T) {
 		{"a=1&%5Fkey=abcd&b=2", "a=1&b=2"},
 		{"_key", ""},
 		{"%5Fkey", ""},
-		{"x_key=abcd", "x_key=abcd"},
-		{"a%5Fkey=abcd", "a%5Fkey=abcd"},
+		// _key-suffixed spellings are treated as the key parameter and stripped.
+		{"x_key=abcd", ""},
+		{"a%5Fkey=abcd", ""},
 		{"ke%79=1", "ke%79=1"},
 		{"", ""},
 	}
@@ -568,5 +569,110 @@ func TestDSNKey_ParamErrorAfterDecode(t *testing.T) {
 	_, err = db.Query("SELECT 1")
 	if err == nil || !strings.Contains(err.Error(), "Invalid _mutex") {
 		t.Fatalf("got %v, want Invalid _mutex error", err)
+	}
+}
+
+func TestDSNKey_Spellings(t *testing.T) {
+	requireCodec(t)
+	key := []byte("0123456789abcdef0123456789abcdef")
+	wrong := []byte("ffffffffffffffffffffffffffffffff")
+	// NOTE: subtest names must not contain raw % spellings: t.TempDir()
+	// embeds the sanitized name in the path and SQLite percent-decodes
+	// file: URI paths, which would redirect the open to a nonexistent
+	// directory.
+	spellings := []struct{ label, raw string }{
+		{"upper", "_KEY"},
+		{"mixed", "_Key"},
+		{"pct-upper", "%5FKEY"},
+		{"pct-lower", "%5fkey"},
+	}
+	for _, sp := range spellings {
+		name := sp.raw
+		t.Run("file-uri/"+sp.label, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "t.db")
+			uri := "file:" + path + "?" + name + "=" + hex.EncodeToString(key)
+			db, err := sql.Open("sqlite3", uri)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec("CREATE TABLE t (v TEXT); INSERT INTO t VALUES ('s')"); err != nil {
+				t.Fatalf("spelling %s: %v", name, err)
+			}
+			db.Close()
+			// Reopen with the canonical spelling must read it.
+			db2, err := sql.Open("sqlite3", path+"?_key="+hex.EncodeToString(key))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var v string
+			if err := db2.QueryRow("SELECT v FROM t").Scan(&v); err != nil {
+				t.Fatalf("reopen via canonical _key after %s: %v", name, err)
+			}
+			db2.Close()
+			// Wrong key must fail.
+			bad, err := sql.Open("sqlite3", path+"?_key="+hex.EncodeToString(wrong))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := bad.Ping(); err == nil {
+				bad.Close()
+				t.Fatalf("wrong key accepted after spelling %s", name)
+			}
+			bad.Close()
+			// Plain open must not read it.
+			plain, _ := sql.Open("sqlite3", path)
+			if _, err := plain.Query("SELECT v FROM t"); err == nil {
+				plain.Close()
+				t.Fatalf("plain open read DB keyed via %s", name)
+			}
+			plain.Close()
+		})
+	}
+
+	t.Run("doubled-question", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "t.db")
+		db, err := sql.Open("sqlite3", path+"??_key="+hex.EncodeToString(key))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec("CREATE TABLE t (v TEXT)"); err != nil {
+			t.Fatalf("??_key spelling: %v", err)
+		}
+		db.Close()
+		plain, _ := sql.Open("sqlite3", path)
+		if _, err := plain.Query("SELECT v FROM t"); err == nil {
+			plain.Close()
+			t.Fatal("plain open read DB keyed via ??_key spelling")
+		}
+		plain.Close()
+	})
+
+	t.Run("duplicate-across-spellings", func(t *testing.T) {
+		db, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "t.db")+
+			"?_key="+hex.EncodeToString(key)+"&_KEY="+hex.EncodeToString(key))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		if _, err := db.Query("SELECT 1"); err == nil || !strings.Contains(err.Error(), "Invalid _key: duplicate") {
+			t.Fatalf("got %v, want duplicate-values error", err)
+		}
+	})
+}
+
+func TestDSNKey_MisspellingRefusedWithoutCodec(t *testing.T) {
+	if codecAvailable(t) {
+		t.Skip("codec available in this build; refusal path not reachable")
+	}
+	key := []byte("0123456789abcdef0123456789abcdef")
+	db, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "t.db")+"?_KEY="+hex.EncodeToString(key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Query("SELECT 1"); err == nil || !strings.Contains(err.Error(), "SQLCipher codec not available") {
+		t.Fatalf("got %v, want codec-unavailable refusal for misspelled _key", err)
 	}
 }
