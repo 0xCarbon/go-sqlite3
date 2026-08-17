@@ -7,15 +7,63 @@ go-sqlite3
 [![codecov](https://codecov.io/gh/mattn/go-sqlite3/branch/master/graph/badge.svg)](https://codecov.io/gh/mattn/go-sqlite3)
 [![Go Report Card](https://goreportcard.com/badge/github.com/mattn/go-sqlite3)](https://goreportcard.com/report/github.com/mattn/go-sqlite3)
 
-Latest stable version is v1.14 or later, not v2.
+## Sponsors
 
-~~**NOTE:** The increase to v2 was an accident. There were no major changes or features.~~
+This project is proudly sponsored by:
+
+<a href="https://coderabbit.link/mattn">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://victorious-bubble-f69a016683.media.strapiapp.com/White_Typemark_79b9189d19.svg">
+    <img src="https://victorious-bubble-f69a016683.media.strapiapp.com/Orange_Typemark_43bf516c9d.svg" alt="CodeRabbit" width="320">
+  </picture>
+</a>
+
+Latest stable version is v1.14 or later, not v2.
 
 # Description
 
 A sqlite3 driver that conforms to the built-in database/sql interface.
 
 Supported Golang version: See [.github/workflows/go.yaml](./.github/workflows/go.yaml).
+
+### 0xCarbon fork: SQLCipher
+
+This fork of [mattn/go-sqlite3](https://github.com/mattn/go-sqlite3) bundles the
+[SQLCipher](https://github.com/sqlcipher/sqlcipher) amalgamation instead of plain
+SQLite, so every build provides at-rest encryption through OpenSSL (libcrypto).
+It tracks upstream `master` and is consumed by the 0xCarbon projects through a
+`replace` directive (module path stays `github.com/mattn/go-sqlite3`):
+
+```go
+replace github.com/mattn/go-sqlite3 => github.com/0xCarbon/go-sqlite3 <version>
+```
+
+Keys are configured per driver or per DSN, in this precedence order:
+
+- `SQLiteDriver.EncryptionKeyBytes []byte` — raw key; the driver hex-encodes it
+  into a zeroized mutable `PRAGMA key = "x'...'"` buffer (key derivation is
+  skipped for raw keys). SQLCipher only honors the raw form for exactly 32
+  bytes, or 48/80 bytes with salt; other lengths are rejected.
+- `SQLiteDriver.EncryptionKey string` — interpolated into `PRAGMA key` as-is;
+  pass a SQL-literal value such as `"x'0123...'"` or a passphrase literal.
+- `_key=<hex>` DSN parameter — raw key for DSNs opened through the globally
+  registered driver; invalid or empty values fail the open.
+
+The key runs as the first statement after `sqlite3_open_v2`, before all other
+pragmas. Note that `_key` DSN values and `EncryptionKey` strings are immutable
+Go strings held by the caller and cannot be scrubbed from process memory;
+prefer `EncryptionKeyBytes` for sensitive keys (the driver wipes its own
+buffers, including the C copies). Keyed opens verify `PRAGMA cipher_version` and fail loudly when the
+linked build has no codec (for example `-tags libsqlite3` against a plain
+system libsqlite3) instead of silently operating unencrypted.
+
+To upgrade the bundled amalgamation, run `upgrade/sqlcipher.sh` (see
+`upgrade/check.sh` for the current vs. latest SQLCipher version). The
+`libsqlite3` build tag links the system library instead of the amalgamation;
+encryption then requires a SQLCipher build of that system library.
+
+The canonical branch for fork work is `master`; `feat/sqlcipher-encryption-key`
+is frozen history that `master` already contains.
 
 This package follows the official [Golang Release Policy](https://golang.org/doc/devel/release.html#policy).
 
@@ -109,6 +157,7 @@ Boolean values can be one of:
 | Busy Timeout | `_busy_timeout` \| `_timeout` | `int` | Specify value for sqlite3_busy_timeout. For more information see [PRAGMA busy_timeout](https://www.sqlite.org/pragma.html#pragma_busy_timeout) |
 | Case Sensitive LIKE | `_case_sensitive_like` \| `_cslike` | `boolean` | For more information see [PRAGMA case_sensitive_like](https://www.sqlite.org/pragma.html#pragma_case_sensitive_like) |
 | Defer Foreign Keys | `_defer_foreign_keys` \| `_defer_fk` | `boolean` | For more information see [PRAGMA defer_foreign_keys](https://www.sqlite.org/pragma.html#pragma_defer_foreign_keys) |
+| Encryption Key | `_key` | `hex string` | 0xCarbon fork: raw SQLCipher key, hex-encoded; must decode to 32, 48 or 80 bytes (`PRAGMA key = "x'...'"` form, key derivation skipped). Lower precedence than the `EncryptionKeyBytes`/`EncryptionKey` driver fields. Invalid, empty or duplicate values fail the open. Keys embedded in the DSN cannot be scrubbed from memory; prefer `EncryptionKeyBytes` for sensitive keys. |
 | Foreign Keys | `_foreign_keys` \| `_fk` | `boolean` | For more information see [PRAGMA foreign_keys](https://www.sqlite.org/pragma.html#pragma_foreign_keys) |
 | Ignore CHECK Constraints | `_ignore_check_constraints` | `boolean` | For more information see [PRAGMA ignore_check_constraints](https://www.sqlite.org/pragma.html#pragma_ignore_check_constraints) |
 | Immutable | `immutable` | `boolean` | For more information see [Immutable](https://www.sqlite.org/c3ref/open.html) |
@@ -125,6 +174,7 @@ Boolean values can be one of:
 | Transaction Lock | `_txlock` | <ul><li>immediate</li><li>deferred</li><li>exclusive</li></ul> | Specify locking behavior for transactions. |
 | Writable Schema | `_writable_schema` | `Boolean` | When this pragma is on, the SQLITE_MASTER tables in which database can be changed using ordinary UPDATE, INSERT, and DELETE statements. Warning: misuse of this pragma can easily result in a corrupt database file. |
 | Cache Size | `_cache_size` | `int` | Maximum cache size; default is 2000K (2M). See [PRAGMA cache_size](https://sqlite.org/pragma.html#pragma_cache_size) |
+| Statement Cache Size | `_stmt_cache_size` | `int` | Maximum number of prepared statements cached per connection; default is 0 (disabled). Note that `sql.DB` is a connection pool, so each connection maintains its own independent cache. |
 
 
 ## DSN Examples
@@ -181,6 +231,7 @@ go build -tags "icu json1 fts5 secure_delete"
 | Tracing / Debug | sqlite_trace | Activate trace functions |
 | User Authentication | sqlite_userauth | SQLite User Authentication see [User Authentication](#user-authentication) for more information. |
 | Virtual Tables | sqlite_vtable | SQLite Virtual Tables see [SQLite Official VTABLE Documentation](https://www.sqlite.org/vtab.html) for more information, and a [full example here](https://github.com/mattn/go-sqlite3/tree/master/_example/vtable) |
+| The DBSTAT Virtual Table | sqlite_dbstat | The DBSTAT virtual table is a read-only virtual table that returns information about the amount of disk space used to store the content of an SQLite database. See [SQLite Official Documentation](https://www.sqlite.org/dbstat.html) for more information. |
 
 # Compilation
 

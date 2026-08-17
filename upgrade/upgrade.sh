@@ -1,8 +1,15 @@
 #!/bin/sh
 
+# 0xCarbon fork: DO NOT RUN. This regenerates a plain-SQLite amalgamation and
+# would clobber the fork's SQLCipher binding (see upgrade/sqlcipher.sh).
+# Kept only to stay close to upstream.
+
 set -e
 
 cd "$(dirname "$0")/.."
+
+echo "Error: upgrade.sh is disabled in the 0xCarbon fork: it would regenerate a plain-SQLite amalgamation and clobber the SQLCipher binding. Use upgrade/sqlcipher.sh instead." >&2
+exit 1
 
 CURRENT_VERSION=$(grep '#define SQLITE_VERSION_NUMBER' sqlite3-binding.c | grep -o '[0-9]\{7\}')
 
@@ -26,8 +33,8 @@ git commit -m "Upgrade SQLite to version $VERSION" sqlite3-binding.c sqlite3-bin
 git push origin HEAD
 
 MAJOR=$(echo $VERSION | cut -c1)
-MINOR=$(echo $VERSION | cut -c2-4 | sed 's/^0*//')
-PATCH=$(echo $VERSION | cut -c5-7 | sed 's/^0*//')
+MINOR=$(echo $VERSION | cut -c2-4 | sed 's/^0*\([0-9]\)/\1/')
+PATCH=$(echo $VERSION | cut -c5-7 | sed 's/^0*\([0-9]\)/\1/')
 CHANGELOG_URL="https://www.sqlite.org/releaselog/${MAJOR}_${MINOR}_${PATCH}.html"
 
 gh pr create --title "Upgrade SQLite to version $VERSION" --body "Automated SQLite upgrade to version $VERSION

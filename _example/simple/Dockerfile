@@ -19,7 +19,10 @@ RUN apk add --no-cache \
     # Important: required for go-sqlite3
     gcc \
     # Required for Alpine
-    musl-dev
+    musl-dev \
+    # Required by the bundled SQLCipher amalgamation (libcrypto)
+    openssl-dev \
+    openssl-libs-static
 
 WORKDIR /workspace
 
