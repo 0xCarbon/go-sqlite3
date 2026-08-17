@@ -48,11 +48,32 @@ fi
 
 echo "Bundling SQLCipher $VERSION (currently ${CURRENT:-none})"
 
+# Pinned commits per release tag (the commit the annotated tag points at).
+# A tag is a mutable ref: the clone is verified to land exactly on the
+# pinned commit, so a retagged release cannot serve different source. When
+# bundling a new version, add its pin here first (after cloning the tag,
+# git -C <dir> rev-parse HEAD).
+PINNED_COMMIT_4_17_0=810db22f575ee7cf94ea96a3e91622b5fcece3dc
+pin_var="PINNED_COMMIT_$(echo "${VERSION#v}" | tr . _)"
+PIN=$(eval "echo \$$pin_var")
+if [ -z "$PIN" ]; then
+  echo "Error: no pinned commit for SQLCipher $VERSION." >&2
+  echo "Add $pin_var=<commit> to upgrade/sqlcipher.sh first" \
+    "(git ls-remote --tags --refs https://github.com/sqlcipher/sqlcipher '$VERSION')." >&2
+  exit 1
+fi
+
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
 git clone --quiet --branch "$VERSION" --depth 1 \
   https://github.com/sqlcipher/sqlcipher "$WORK/sqlcipher"
+
+CLONED=$(git -C "$WORK/sqlcipher" rev-parse HEAD)
+if [ "$CLONED" != "$PIN" ]; then
+  echo "Error: cloned $CLONED, expected pinned $PIN" >&2
+  exit 1
+fi
 
 cd "$WORK/sqlcipher"
 ./configure --with-tempstore=yes \
