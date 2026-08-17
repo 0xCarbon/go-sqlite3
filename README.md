@@ -26,6 +26,41 @@ A sqlite3 driver that conforms to the built-in database/sql interface.
 
 Supported Golang version: See [.github/workflows/go.yaml](./.github/workflows/go.yaml).
 
+### 0xCarbon fork: SQLCipher
+
+This fork of [mattn/go-sqlite3](https://github.com/mattn/go-sqlite3) bundles the
+[SQLCipher](https://github.com/sqlcipher/sqlcipher) amalgamation instead of plain
+SQLite, so every build provides at-rest encryption through OpenSSL (libcrypto).
+It tracks upstream `master` and is consumed by the 0xCarbon projects through a
+`replace` directive (module path stays `github.com/mattn/go-sqlite3`):
+
+```go
+replace github.com/mattn/go-sqlite3 => github.com/0xCarbon/go-sqlite3 <version>
+```
+
+Keys are configured per driver or per DSN, in this precedence order:
+
+- `SQLiteDriver.EncryptionKeyBytes []byte` — raw key; the driver hex-encodes it
+  into a zeroized mutable `PRAGMA key = "x'...'"` buffer (key derivation is
+  skipped for raw keys).
+- `SQLiteDriver.EncryptionKey string` — interpolated into `PRAGMA key` as-is;
+  pass a SQL-literal value such as `"x'0123...'"` or a passphrase literal.
+- `_key=<hex>` DSN parameter — raw key for DSNs opened through the globally
+  registered driver; invalid or empty values fail the open.
+
+The key runs as the first statement after `sqlite3_open_v2`, before all other
+pragmas. Keyed opens verify `PRAGMA cipher_version` and fail loudly when the
+linked build has no codec (for example `-tags libsqlite3` against a plain
+system libsqlite3) instead of silently operating unencrypted.
+
+To upgrade the bundled amalgamation, run `upgrade/sqlcipher.sh` (see
+`upgrade/check.sh` for the current vs. latest SQLCipher version). The
+`libsqlite3` build tag links the system library instead of the amalgamation;
+encryption then requires a SQLCipher build of that system library.
+
+The canonical branch for fork work is `master`; `feat/sqlcipher-encryption-key`
+is frozen history that `master` already contains.
+
 This package follows the official [Golang Release Policy](https://golang.org/doc/devel/release.html#policy).
 
 ### Overview
@@ -122,6 +157,7 @@ Boolean values can be one of:
 | Ignore CHECK Constraints | `_ignore_check_constraints` | `boolean` | For more information see [PRAGMA ignore_check_constraints](https://www.sqlite.org/pragma.html#pragma_ignore_check_constraints) |
 | Immutable | `immutable` | `boolean` | For more information see [Immutable](https://www.sqlite.org/c3ref/open.html) |
 | Journal Mode | `_journal_mode` \| `_journal` | <ul><li>DELETE</li><li>TRUNCATE</li><li>PERSIST</li><li>MEMORY</li><li>WAL</li><li>OFF</li></ul> | For more information see [PRAGMA journal_mode](https://www.sqlite.org/pragma.html#pragma_journal_mode) |
+| Encryption Key | `_key` | `hex string` | 0xCarbon fork: raw SQLCipher key, hex-encoded (`PRAGMA key = "x'...'"` form, key derivation skipped). Lower precedence than the `EncryptionKeyBytes`/`EncryptionKey` driver fields. Invalid or empty values fail the open. |
 | Locking Mode | `_locking_mode` \| `_locking` | <ul><li>NORMAL</li><li>EXCLUSIVE</li></ul> | For more information see [PRAGMA locking_mode](https://www.sqlite.org/pragma.html#pragma_locking_mode) |
 | Mode | `mode` | <ul><li>ro</li><li>rw</li><li>rwc</li><li>memory</li></ul> | Access Mode of the database. For more information see [SQLite Open](https://www.sqlite.org/c3ref/open.html) |
 | Mutex Locking | `_mutex` | <ul><li>no</li><li>full</li></ul> | Specify mutex mode. |
