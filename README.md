@@ -31,11 +31,16 @@ Supported Golang version: See [.github/workflows/go.yaml](./.github/workflows/go
 This fork of [mattn/go-sqlite3](https://github.com/mattn/go-sqlite3) bundles the
 [SQLCipher](https://github.com/sqlcipher/sqlcipher) amalgamation instead of plain
 SQLite, so every build provides at-rest encryption through OpenSSL (libcrypto).
-It tracks upstream `master` and is consumed by the 0xCarbon projects through a
-`replace` directive (module path stays `github.com/mattn/go-sqlite3`):
+It tracks upstream `master` and is consumed directly under its own module
+path — import and require `github.com/0xCarbon/go-sqlite3`; no `replace`
+directive is needed:
 
 ```go
-replace github.com/mattn/go-sqlite3 => github.com/0xCarbon/go-sqlite3 <version>
+import _ "github.com/0xCarbon/go-sqlite3"
+```
+
+```go
+require github.com/0xCarbon/go-sqlite3 <version>
 ```
 
 Keys are configured per driver or per DSN, in this precedence order:
