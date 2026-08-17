@@ -41,7 +41,29 @@ func openWithKeyBytes(t *testing.T, path string, key []byte) *sql.DB {
 	return db
 }
 
+// requireCodec skips the test when the linked SQLite build has no SQLCipher
+// codec (e.g. -tags libsqlite3 against a plain system libsqlite3): PRAGMA
+// cipher_version returns no rows there. A system SQLCipher build still runs
+// the suite.
+func requireCodec(t *testing.T) {
+	t.Helper()
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var version string
+	err = db.QueryRow("PRAGMA cipher_version").Scan(&version)
+	if err == sql.ErrNoRows {
+		t.Skip("no SQLCipher codec in this build (plain SQLite?)")
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestEncryptionKeyBytes_RoundTrip(t *testing.T) {
+	requireCodec(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.db")
 	key := []byte("0123456789abcdef0123456789abcdef")
@@ -73,6 +95,7 @@ func TestEncryptionKeyBytes_RoundTrip(t *testing.T) {
 }
 
 func TestEncryptionKeyBytes_WrongKeyFails(t *testing.T) {
+	requireCodec(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.db")
 	key := []byte("0123456789abcdef0123456789abcdef")
@@ -94,6 +117,7 @@ func TestEncryptionKeyBytes_WrongKeyFails(t *testing.T) {
 }
 
 func TestEncryptionKeyBytes_PrecedenceOverString(t *testing.T) {
+	requireCodec(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.db")
 	key := []byte("0123456789abcdef0123456789abcdef")
@@ -124,6 +148,7 @@ func TestEncryptionKeyBytes_PrecedenceOverString(t *testing.T) {
 }
 
 func TestEncryptionKeyBytes_NilMeansNoKey(t *testing.T) {
+	requireCodec(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "plain.db")
 
