@@ -682,6 +682,10 @@ func TestDSNKey_SQLiteNativeKeyParamsRejected(t *testing.T) {
 	dir := t.TempDir()
 	for _, q := range []string{
 		"key=passphrase", "hexkey=0102", "textkey=pass", "KEY=pass", "HexKey=0102", "TEXTKEY=pass",
+		// SQLite truncates URI parameter names at %00: these reach SQLite
+		// as native key=/hexkey=/textkey= and must be rejected too.
+		"key%00z=passphrase", "hexkey%00z=0102", "textkey%00z=pass",
+		"KEY%00z=pass", "HexKey%00z=0102", "%6B%65%79%00z=pass",
 	} {
 		db, err := sql.Open("sqlite3", "file:"+filepath.Join(dir, "t.db")+"?"+q)
 		if err != nil {
@@ -692,8 +696,9 @@ func TestDSNKey_SQLiteNativeKeyParamsRejected(t *testing.T) {
 		}
 		db.Close()
 	}
-	// A benign file: parameter is untouched.
-	db, err := sql.Open("sqlite3", "file:"+filepath.Join(dir, "ok.db")+"?cache=shared")
+	// A benign file: parameter is untouched — including one whose name
+	// carries a NUL (SQLite truncates it the same way we do).
+	db, err := sql.Open("sqlite3", "file:"+filepath.Join(dir, "ok.db")+"?cache=shared&ca%00che=shared")
 	if err != nil {
 		t.Fatal(err)
 	}

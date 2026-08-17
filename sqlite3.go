@@ -1362,6 +1362,14 @@ func (d *SQLiteDriver) Open(dsn string) (driver.Conn, error) {
 		// only keying surface is _key/EncryptionKey/EncryptionKeyBytes.
 		if strings.HasPrefix(dsn, "file:") {
 			for name := range params {
+				// SQLite truncates URI parameter names at %00 when it
+				// parses the URI itself (sqlite3ParseUri ignores the rest
+				// of a name after a NUL), while url.ParseQuery keeps the
+				// NUL-bearing name. Compare on the truncated name or
+				// key%00x=... reaches SQLite as a native key= parameter.
+				if i := strings.IndexByte(name, 0); i >= 0 {
+					name = name[:i]
+				}
 				if strings.EqualFold(name, "key") || strings.EqualFold(name, "hexkey") || strings.EqualFold(name, "textkey") {
 					return nil, fmt.Errorf("sqlite3: DSN parameter %q is not supported; pass SQLCipher keys via _key=<hex>, EncryptionKey or EncryptionKeyBytes", name)
 				}
