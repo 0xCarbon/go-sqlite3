@@ -1237,11 +1237,28 @@ func (d *SQLiteDriver) Open(dsn string) (driver.Conn, error) {
 	var cacheSize *int64
 	stmtCacheSize := 0
 
+	var dsnKey []byte
+
 	pos := strings.IndexRune(dsn, '?')
 	if pos >= 1 {
 		params, err := url.ParseQuery(dsn[pos+1:])
 		if err != nil {
 			return nil, err
+		}
+
+		// _key: raw SQLCipher key, hex-encoded (PRAGMA key "x'...'" form;
+		// skips key derivation). Lower precedence than the EncryptionKeyBytes
+		// and EncryptionKey driver fields. Invalid or empty values error
+		// instead of being silently dropped.
+		if vals, ok := params["_key"]; ok {
+			val := vals[0]
+			if val == "" {
+				return nil, errors.New("Invalid _key: empty value")
+			}
+			dsnKey, err = hex.DecodeString(val)
+			if err != nil {
+				return nil, fmt.Errorf("Invalid _key: %v", err)
+			}
 		}
 
 		// Authentication
@@ -1647,14 +1664,16 @@ func (d *SQLiteDriver) Open(dsn string) (driver.Conn, error) {
 	// database access, including PRAGMA busy_timeout.
 	// EncryptionKeyBytes takes precedence — it builds the PRAGMA in a mutable
 	// buffer that is zeroized after use, avoiding immutable Go string copies.
-	switch {
-	case len(d.EncryptionKeyBytes) > 0:
+	// execRawKey issues PRAGMA key for a raw key: hex-encoded into a mutable
+	// buffer that is zeroized after use, avoiding immutable Go string copies.
+	// Raw keys skip SQLCipher's key derivation.
+	execRawKey := func(raw []byte) error {
 		const prefix = "PRAGMA key = \"x'"
 		const suffix = "'\";"
-		buf := make([]byte, len(prefix)+hex.EncodedLen(len(d.EncryptionKeyBytes))+len(suffix)+1)
+		buf := make([]byte, len(prefix)+hex.EncodedLen(len(raw))+len(suffix)+1)
 		copy(buf, prefix)
-		hex.Encode(buf[len(prefix):], d.EncryptionKeyBytes)
-		copy(buf[len(prefix)+hex.EncodedLen(len(d.EncryptionKeyBytes)):], suffix)
+		hex.Encode(buf[len(prefix):], raw)
+		copy(buf[len(prefix)+hex.EncodedLen(len(raw)):], suffix)
 
 		rv := C.sqlite3_exec(db, (*C.char)(unsafe.Pointer(&buf[0])), nil, nil, nil)
 		runtime.KeepAlive(buf)
@@ -1665,10 +1684,27 @@ func (d *SQLiteDriver) Open(dsn string) (driver.Conn, error) {
 		if rv != C.SQLITE_OK {
 			// Capture the error before fail() closes the handle; reading
 			// sqlite3_errmsg after sqlite3_close_v2 is undefined.
-			return fail(lastError(db))
+			return lastError(db)
+		}
+		return nil
+	}
+
+	// Driver fields take precedence over the _key DSN parameter.
+	switch {
+	case len(d.EncryptionKeyBytes) > 0:
+		if err := execRawKey(d.EncryptionKeyBytes); err != nil {
+			return fail(err)
 		}
 	case d.EncryptionKey != "":
 		if err := exec(fmt.Sprintf("PRAGMA key = %s;", d.EncryptionKey)); err != nil {
+			return fail(err)
+		}
+	case len(dsnKey) > 0:
+		err := execRawKey(dsnKey)
+		for i := range dsnKey {
+			dsnKey[i] = 0
+		}
+		if err != nil {
 			return fail(err)
 		}
 	}

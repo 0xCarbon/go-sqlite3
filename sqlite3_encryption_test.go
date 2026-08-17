@@ -12,6 +12,8 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -169,4 +171,161 @@ func TestEncryptionKeyBytes_NilMeansNoKey(t *testing.T) {
 	if len(data) < 16 || string(data[:15]) != "SQLite format 3" {
 		t.Fatal("expected plain SQLite header")
 	}
+}
+
+func TestDSNKey_RoundTrip(t *testing.T) {
+	requireCodec(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.db")
+	key := []byte("0123456789abcdef0123456789abcdef")
+	dsn := path + "?_key=" + hex.EncodeToString(key)
+
+	db, err := sql.Open("sqlite3", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("CREATE TABLE t (v TEXT)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("INSERT INTO t VALUES ('dsn-key')"); err != nil {
+		t.Fatal(err)
+	}
+	var version string
+	if err := db.QueryRow("PRAGMA cipher_version").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version == "" {
+		t.Fatal("PRAGMA cipher_version empty: codec not active")
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db2, err := sql.Open("sqlite3", dsn+"&_txlock=immediate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v string
+	if err := db2.QueryRow("SELECT v FROM t").Scan(&v); err != nil {
+		t.Fatal(err)
+	}
+	if v != "dsn-key" {
+		t.Fatalf("got %q, want %q", v, "dsn-key")
+	}
+	if err := db2.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// The file must actually be encrypted: a plain open cannot read it.
+	plain, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := plain.Query("SELECT v FROM t"); err == nil {
+		plain.Close()
+		t.Fatal("plain open unexpectedly read an encrypted database")
+	}
+	plain.Close()
+}
+
+func TestDSNKey_WrongKeyFails(t *testing.T) {
+	requireCodec(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.db")
+	key := []byte("0123456789abcdef0123456789abcdef")
+	wrong := []byte("ffffffffffffffffffffffffffffffff")
+
+	db, err := sql.Open("sqlite3", path+"?_key="+hex.EncodeToString(key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("CREATE TABLE t (v TEXT)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	bad, err := sql.Open("sqlite3", path+"?_key="+hex.EncodeToString(wrong))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bad.Query("SELECT v FROM t"); err == nil {
+		bad.Close()
+		t.Fatal("wrong key unexpectedly read the database")
+	} else {
+		var serr Error
+		if !errors.As(err, &serr) || serr.Code != ErrNotADB {
+			t.Fatalf("got %v, want ErrNotADB", err)
+		}
+	}
+	bad.Close()
+}
+
+func TestDSNKey_InvalidHexFails(t *testing.T) {
+	requireCodec(t)
+	db, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "t.db")+"?_key=zz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Query("SELECT 1"); err == nil {
+		t.Fatal("invalid _key hex unexpectedly opened the database")
+	}
+}
+
+func TestDSNKey_EmptyFails(t *testing.T) {
+	requireCodec(t)
+	db, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "t.db")+"?_key=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Query("SELECT 1"); err == nil {
+		t.Fatal("empty _key unexpectedly opened the database")
+	}
+}
+
+func TestDSNKey_DriverFieldTakesPrecedence(t *testing.T) {
+	requireCodec(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.db")
+	fieldKey := []byte("0123456789abcdef0123456789abcdef")
+	dsnKey := []byte("ffffffffffffffffffffffffffffffff")
+
+	// Driver field wins over the _key DSN parameter: the database is
+	// keyed with fieldKey even though the DSN carries a different key.
+	db := sql.OpenDB(&testConnector{
+		d:   &SQLiteDriver{EncryptionKeyBytes: fieldKey},
+		dsn: path + "?_key=" + hex.EncodeToString(dsnKey),
+	})
+	if _, err := db.Exec("CREATE TABLE t (v TEXT)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reopening with only the DSN key must fail: the file is keyed with
+	// the field key.
+	bad, err := sql.Open("sqlite3", path+"?_key="+hex.EncodeToString(dsnKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bad.Query("SELECT v FROM t"); err == nil {
+		bad.Close()
+		t.Fatal("dsn key unexpectedly opened a field-keyed database")
+	}
+	bad.Close()
+
+	// Reopening with the field key through the DSN works.
+	ok, err := sql.Open("sqlite3", path+"?_key="+hex.EncodeToString(fieldKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ok.Query("SELECT v FROM t"); err != nil {
+		ok.Close()
+		t.Fatal(err)
+	}
+	ok.Close()
 }
