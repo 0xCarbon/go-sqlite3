@@ -44,11 +44,9 @@ func openWithKeyBytes(t *testing.T, path string, key []byte) *sql.DB {
 	return db
 }
 
-// requireCodec skips the test when the linked SQLite build has no SQLCipher
-// codec (e.g. -tags libsqlite3 against a plain system libsqlite3): PRAGMA
-// cipher_version returns no rows there. A system SQLCipher build still runs
-// the suite.
-func requireCodec(t *testing.T) {
+// codecAvailable reports whether the linked SQLite build provides the
+// SQLCipher codec: PRAGMA cipher_version returns a row only on codec builds.
+func codecAvailable(t *testing.T) bool {
 	t.Helper()
 	db, err := sql.Open("sqlite3", ":memory:")
 	if err != nil {
@@ -56,12 +54,16 @@ func requireCodec(t *testing.T) {
 	}
 	defer db.Close()
 	var version string
-	err = db.QueryRow("PRAGMA cipher_version").Scan(&version)
-	if err == sql.ErrNoRows {
+	return db.QueryRow("PRAGMA cipher_version").Scan(&version) == nil
+}
+
+// requireCodec skips the test when the linked SQLite build has no SQLCipher
+// codec (e.g. -tags libsqlite3 against a plain system libsqlite3). A system
+// SQLCipher build still runs the suite.
+func requireCodec(t *testing.T) {
+	t.Helper()
+	if !codecAvailable(t) {
 		t.Skip("no SQLCipher codec in this build (plain SQLite?)")
-	}
-	if err != nil {
-		t.Fatal(err)
 	}
 }
 
@@ -264,27 +266,155 @@ func TestDSNKey_WrongKeyFails(t *testing.T) {
 }
 
 func TestDSNKey_InvalidHexFails(t *testing.T) {
-	requireCodec(t)
 	db, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "t.db")+"?_key=zz")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	if _, err := db.Query("SELECT 1"); err == nil {
-		t.Fatal("invalid _key hex unexpectedly opened the database")
+	_, err = db.Query("SELECT 1")
+	if err == nil || !strings.Contains(err.Error(), "Invalid _key") {
+		t.Fatalf("got %v, want Invalid _key error", err)
 	}
 }
 
 func TestDSNKey_EmptyFails(t *testing.T) {
-	requireCodec(t)
 	db, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "t.db")+"?_key=")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	if _, err := db.Query("SELECT 1"); err == nil {
-		t.Fatal("empty _key unexpectedly opened the database")
+	_, err = db.Query("SELECT 1")
+	if err == nil || !strings.Contains(err.Error(), "Invalid _key") {
+		t.Fatalf("got %v, want Invalid _key error", err)
 	}
+}
+
+func TestDSNKey_DuplicateFails(t *testing.T) {
+	dir := t.TempDir()
+	key := []byte("0123456789abcdef0123456789abcdef")
+	db, err := sql.Open("sqlite3",
+		filepath.Join(dir, "t.db")+"?_key="+hex.EncodeToString(key)+"&_key="+hex.EncodeToString(key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	_, err = db.Query("SELECT 1")
+	if err == nil || !strings.Contains(err.Error(), "Invalid _key: duplicate") {
+		t.Fatalf("got %v, want Invalid _key: duplicate values error", err)
+	}
+}
+
+func TestRawKeyLengthValidated(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "t.db")
+
+	db := openWithKeyBytes(t, path, []byte("short"))
+	if _, err := db.Exec("CREATE TABLE t (v TEXT)"); err == nil ||
+		!strings.Contains(err.Error(), "invalid raw key length") {
+		db.Close()
+		t.Fatalf("EncryptionKeyBytes: got %v, want invalid raw key length error", err)
+	}
+	db.Close()
+
+	bad, err := sql.Open("sqlite3", path+"?_key=00112233") // 4 bytes
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bad.Query("SELECT 1"); err == nil ||
+		!strings.Contains(err.Error(), "invalid raw key length") {
+		bad.Close()
+		t.Fatalf("_key DSN: got %v, want invalid raw key length error", err)
+	}
+	bad.Close()
+}
+
+func TestEncryptionKey_RoundTrip(t *testing.T) {
+	requireCodec(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.db")
+	raw := []byte("0123456789abcdef0123456789abcdef")
+	// EncryptionKey receives a SQL literal. The raw-key blob form is x'...'
+	// wrapped in double quotes (the consumer contract; see go-alore's
+	// DeriveDBKey).
+	literal := "\"x'" + hex.EncodeToString(raw) + "'\""
+
+	db := sql.OpenDB(&testConnector{
+		d:   &SQLiteDriver{EncryptionKey: literal},
+		dsn: path,
+	})
+	if _, err := db.Exec("CREATE TABLE t (v TEXT); INSERT INTO t VALUES ('k')"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reopen with the same literal.
+	db2 := sql.OpenDB(&testConnector{
+		d:   &SQLiteDriver{EncryptionKey: literal},
+		dsn: path,
+	})
+	var v string
+	if err := db2.QueryRow("SELECT v FROM t").Scan(&v); err != nil {
+		t.Fatal(err)
+	}
+	if v != "k" {
+		t.Fatalf("got %q, want %q", v, "k")
+	}
+	db2.Close()
+
+	// The same key material via EncryptionKeyBytes must read the same file.
+	db3 := openWithKeyBytes(t, path, raw)
+	if err := db3.QueryRow("SELECT v FROM t").Scan(&v); err != nil {
+		t.Fatal(err)
+	}
+	db3.Close()
+}
+
+func TestDSNKey_FileURI(t *testing.T) {
+	requireCodec(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.db")
+	key := []byte("0123456789abcdef0123456789abcdef")
+	uri := "file:" + path + "?_key=" + hex.EncodeToString(key) + "&cache=shared"
+
+	db, err := sql.Open("sqlite3", uri)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("CREATE TABLE t (v TEXT); INSERT INTO t VALUES ('uri')"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reopen through a plain (non-file:) DSN with the same key: the _key
+	// segment must have been stripped from the URI handed to SQLite, not
+	// from the keying behavior.
+	db2, err := sql.Open("sqlite3", path+"?_key="+hex.EncodeToString(key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v string
+	if err := db2.QueryRow("SELECT v FROM t").Scan(&v); err != nil {
+		t.Fatal(err)
+	}
+	if v != "uri" {
+		t.Fatalf("got %q, want %q", v, "uri")
+	}
+	db2.Close()
+
+	// A plain open cannot read the file.
+	plain, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := plain.Query("SELECT v FROM t"); err == nil {
+		plain.Close()
+		t.Fatal("plain open unexpectedly read an encrypted database")
+	}
+	plain.Close()
 }
 
 func TestDSNKey_DriverFieldTakesPrecedence(t *testing.T) {
@@ -335,14 +465,7 @@ func TestDSNKey_DriverFieldTakesPrecedence(t *testing.T) {
 // builds without the SQLCipher codec (e.g. -tags libsqlite3 against a plain
 // system libsqlite3) instead of silently operating unencrypted.
 func TestKeyedOpenRefusedWithoutCodec(t *testing.T) {
-	probe, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var version string
-	perr := probe.QueryRow("PRAGMA cipher_version").Scan(&version)
-	probe.Close()
-	if perr == nil {
+	if codecAvailable(t) {
 		t.Skip("codec available in this build; refusal path not reachable")
 	}
 
@@ -351,7 +474,7 @@ func TestKeyedOpenRefusedWithoutCodec(t *testing.T) {
 	key := []byte("0123456789abcdef0123456789abcdef")
 
 	db := openWithKeyBytes(t, path, key)
-	_, err = db.Exec("CREATE TABLE t (v TEXT)")
+	_, err := db.Exec("CREATE TABLE t (v TEXT)")
 	if err == nil || !strings.Contains(err.Error(), "SQLCipher codec not available") {
 		db.Close()
 		t.Fatalf("EncryptionKeyBytes open: got %v, want codec-unavailable refusal", err)

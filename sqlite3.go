@@ -473,12 +473,12 @@ type SQLiteDriver struct {
 	// PRAGMA key is executed (plain SQLite behavior).
 	EncryptionKey string
 
-	// EncryptionKeyBytes sets the SQLCipher PRAGMA key from raw bytes.
-	// The driver hex-encodes the key internally and zeroizes the
-	// intermediate PRAGMA buffer after each connection open. Takes
-	// precedence over EncryptionKey when non-nil. The caller retains
-	// ownership of the slice and must not modify it while connections
-	// may be opened; zero it after closing the *sql.DB.
+	// EncryptionKeyBytes sets the SQLCipher PRAGMA key from raw bytes
+	// (32 bytes, or 48/80 with salt). The driver hex-encodes the key
+	// internally and zeroizes the intermediate PRAGMA buffer after each
+	// connection open. Takes precedence over EncryptionKey when non-empty.
+	// The caller retains ownership of the slice and must not modify it while
+	// connections may be opened; zero it after closing the *sql.DB.
 	EncryptionKeyBytes []byte
 }
 
@@ -1218,6 +1218,30 @@ func (c *SQLiteConn) begin(ctx context.Context) (driver.Tx, error) {
 //	  When this pragma is on, the SQLITE_MASTER tables in which database
 //	  can be changed using ordinary UPDATE, INSERT, and DELETE statements.
 //	  Warning: misuse of this pragma can easily result in a corrupt database file.
+//
+//	_key=hex
+//	  0xCarbon fork: raw SQLCipher key, hex-encoded (32, 48 or 80 bytes when
+//	  decoded). Applied as the first statement after the database is opened,
+//	  before all other pragmas. Lower precedence than the EncryptionKeyBytes
+//	  and EncryptionKey driver fields. Invalid, empty or duplicate values
+//	  fail the open.
+//
+// stripKeyParam removes the _key segment from a raw DSN query string while
+// preserving every other byte (no URL re-encoding; url.Values.Encode could
+// mutate other parameters' encoding). Open rejects duplicate _key values
+// before calling this, so at most one segment is removed.
+func stripKeyParam(query string) string {
+	segs := strings.Split(query, "&")
+	kept := make([]string, 0, len(segs))
+	for _, seg := range segs {
+		if strings.HasPrefix(seg, "_key=") || seg == "_key" {
+			continue
+		}
+		kept = append(kept, seg)
+	}
+	return strings.Join(kept, "&")
+}
+
 func (d *SQLiteDriver) Open(dsn string) (driver.Conn, error) {
 	if C.sqlite3_threadsafe() == 0 {
 		return nil, errors.New("sqlite library was not compiled for thread-safe operation")
@@ -1263,10 +1287,14 @@ func (d *SQLiteDriver) Open(dsn string) (driver.Conn, error) {
 		}
 
 		// _key: raw SQLCipher key, hex-encoded (PRAGMA key "x'...'" form;
-		// skips key derivation). Lower precedence than the EncryptionKeyBytes
-		// and EncryptionKey driver fields. Invalid or empty values error
-		// instead of being silently dropped.
+		// skips key derivation; must decode to 32, 48 or 80 bytes). Lower
+		// precedence than the EncryptionKeyBytes and EncryptionKey driver
+		// fields. Invalid, empty or duplicate values error instead of being
+		// silently dropped.
 		if vals, ok := params["_key"]; ok {
+			if len(vals) > 1 {
+				return nil, errors.New("Invalid _key: duplicate values")
+			}
 			val := vals[0]
 			if val == "" {
 				return nil, errors.New("Invalid _key: empty value")
@@ -1624,6 +1652,16 @@ func (d *SQLiteDriver) Open(dsn string) (driver.Conn, error) {
 
 		if !strings.HasPrefix(dsn, "file:") {
 			dsn = dsn[:pos]
+		} else if len(dsnKey) > 0 {
+			// file: DSNs keep the query in the filename handed to
+			// sqlite3_open_v2 (SQLITE_OPEN_URI); drop the _key segment so
+			// the raw-key hex does not persist in the C-string filename
+			// and SQLite's retained URI.
+			if q := stripKeyParam(dsn[pos+1:]); q != "" {
+				dsn = dsn[:pos+1] + q
+			} else {
+				dsn = dsn[:pos]
+			}
 		}
 	}
 
@@ -1665,70 +1703,79 @@ func (d *SQLiteDriver) Open(dsn string) (driver.Conn, error) {
 		return nil, err
 	}
 
-	exec := func(s string) error {
-		cs := C.CString(s)
-		rv := C.sqlite3_exec(db, cs, nil, nil, nil)
-		C.free(unsafe.Pointer(cs))
-		if rv != C.SQLITE_OK {
-			return lastError(db)
-		}
-		return nil
-	}
-
-	// SQLCipher: set encryption key as the FIRST statement after sqlite3_open_v2().
-	// Must precede all other pragmas — SQLCipher requires the key before any
-	// database access, including PRAGMA busy_timeout.
-	// EncryptionKeyBytes takes precedence — it builds the PRAGMA in a mutable
-	// buffer that is zeroized after use, avoiding immutable Go string copies.
-	// execRawKey issues PRAGMA key for a raw key: hex-encoded into a mutable
-	// buffer that is zeroized after use, avoiding immutable Go string copies.
-	// Raw keys skip SQLCipher's key derivation.
-	execRawKey := func(raw []byte) error {
-		const prefix = "PRAGMA key = \"x'"
-		const suffix = "'\";"
-		buf := make([]byte, len(prefix)+hex.EncodedLen(len(raw))+len(suffix)+1)
-		copy(buf, prefix)
-		hex.Encode(buf[len(prefix):], raw)
-		copy(buf[len(prefix)+hex.EncodedLen(len(raw)):], suffix)
-
+	// execBuf runs buf (a NUL-terminated SQL statement) through
+	// sqlite3_exec and zeroizes the buffer afterwards, so no copy of the
+	// statement — in particular key material — survives on the C or Go
+	// heap after the call.
+	execBuf := func(buf []byte) error {
 		rv := C.sqlite3_exec(db, (*C.char)(unsafe.Pointer(&buf[0])), nil, nil, nil)
 		runtime.KeepAlive(buf)
 		for i := range buf {
 			buf[i] = 0
 		}
-
 		if rv != C.SQLITE_OK {
-			// Capture the error before fail() closes the handle; reading
-			// sqlite3_errmsg after sqlite3_close_v2 is undefined.
 			return lastError(db)
 		}
 		return nil
 	}
 
-	// Driver fields take precedence over the _key DSN parameter.
+	exec := func(s string) error {
+		// The trailing NUL comes from make's zero fill.
+		buf := make([]byte, len(s)+1)
+		copy(buf, s)
+		return execBuf(buf)
+	}
+
+	// execRawKey issues PRAGMA key for a raw key, hex-encoded into the
+	// x'...' raw-key form. SQLCipher honors that form as a raw key only for
+	// exactly 32 bytes (key), 48 (key + salt) or 80 (key + HMAC key + salt);
+	// any other length silently falls back to key derivation over the
+	// literal text, so reject it loudly.
+	execRawKey := func(raw []byte) error {
+		if l := len(raw); l != 32 && l != 48 && l != 80 {
+			return fmt.Errorf("sqlite3: invalid raw key length %d: must be 32, 48, or 80 bytes", l)
+		}
+		const prefix = "PRAGMA key = \"x'"
+		const suffix = "'\";"
+		// The trailing NUL comes from make's zero fill.
+		buf := make([]byte, len(prefix)+hex.EncodedLen(len(raw))+len(suffix)+1)
+		copy(buf, prefix)
+		hex.Encode(buf[len(prefix):], raw)
+		copy(buf[len(prefix)+hex.EncodedLen(len(raw)):], suffix)
+		return execBuf(buf)
+	}
+
+	// SQLCipher: set the encryption key as the FIRST statement after
+	// sqlite3_open_v2(). It must precede all other pragmas — SQLCipher
+	// requires the key before any database access, including PRAGMA
+	// busy_timeout. Driver fields take precedence over the _key DSN
+	// parameter.
+	keyed := len(d.EncryptionKeyBytes) > 0 || d.EncryptionKey != "" || len(dsnKey) > 0
 	switch {
 	case len(d.EncryptionKeyBytes) > 0:
 		if err := execRawKey(d.EncryptionKeyBytes); err != nil {
 			return fail(err)
 		}
 	case d.EncryptionKey != "":
-		if err := exec(fmt.Sprintf("PRAGMA key = %s;", d.EncryptionKey)); err != nil {
+		if err := exec("PRAGMA key = " + d.EncryptionKey + ";"); err != nil {
 			return fail(err)
 		}
 	case len(dsnKey) > 0:
-		err := execRawKey(dsnKey)
-		for i := range dsnKey {
-			dsnKey[i] = 0
-		}
-		if err != nil {
+		if err := execRawKey(dsnKey); err != nil {
 			return fail(err)
 		}
+	}
+	// dsnKey is a decoded copy of the _key DSN parameter; wipe it whichever
+	// branch consumed or ignored it. The DSN string itself is caller-owned
+	// and cannot be scrubbed here.
+	for i := range dsnKey {
+		dsnKey[i] = 0
 	}
 
 	// A keyed open is meaningless without a codec: on plain SQLite builds
 	// PRAGMA key is silently ignored and the database would be created or
 	// read as plaintext. Refuse instead.
-	if len(d.EncryptionKeyBytes) > 0 || d.EncryptionKey != "" || len(dsnKey) > 0 {
+	if keyed {
 		if C._sqlite3_codec_available(db) != 1 {
 			return fail(errors.New("sqlite3: keyed open refused: SQLCipher codec not available in this build"))
 		}
