@@ -21,7 +21,14 @@ jobs:
       GO: ${{ matrix.go }}
     steps:
       - if: startsWith(matrix.os, 'macos')
-        run: brew update
+        run: |
+          brew update
+          # The fork bundles SQLCipher with SQLCIPHER_CRYPTO_OPENSSL, so every
+          # build links libcrypto. Homebrew openssl@3 is keg-only; expose it
+          # to cgo explicitly.
+          brew install openssl@3
+          echo "CGO_CFLAGS=-I$(brew --prefix openssl@3)/include" >> "$GITHUB_ENV"
+          echo "CGO_LDFLAGS=-L$(brew --prefix openssl@3)/lib" >> "$GITHUB_ENV"
 
       - uses: actions/setup-go@v6
         with:
@@ -73,7 +80,7 @@ jobs:
       - uses: msys2/setup-msys2@v2
         with:
           update: true
-          install: mingw-w64-x86_64-toolchain mingw-w64-x86_64-sqlite3
+          install: mingw-w64-x86_64-toolchain mingw-w64-x86_64-sqlite3 mingw-w64-x86_64-openssl
           msystem: MINGW64
           path-type: inherit
 
