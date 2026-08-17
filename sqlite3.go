@@ -1227,19 +1227,21 @@ func (c *SQLiteConn) begin(ctx context.Context) (driver.Tx, error) {
 //	  fail the open.
 //
 // isKeyParamName reports whether a decoded DSN parameter name is a spelling
-// of the _key parameter: case-insensitive, ending in "_key" (covers _KEY,
-// %5Fkey, and "?_key"-style separator typos).
+// of the _key parameter: exactly "_key", case-insensitively (covers _KEY and
+// %5Fkey, which decode to the same name), plus the literal "?_key" produced
+// by a doubled "?" separator typo. Other "_key"-suffixed names (a custom VFS
+// parameter such as kms_key) are ordinary parameters, not keys.
 func isKeyParamName(name string) bool {
-	return strings.HasSuffix(strings.ToLower(name), "_key")
+	return strings.EqualFold(name, "_key") || strings.EqualFold(name, "?_key")
 }
 
 // stripKeyParam removes the _key segment from a raw DSN query string while
 // preserving every other byte (no URL re-encoding; url.Values.Encode could
 // mutate other parameters' encoding). Open rejects duplicate _key values
 // before calling this, so at most one segment is removed. Name matching
-// mirrors isKeyParamName (case-insensitive, any "_key"-suffixed spelling —
-// Open already accepted it as the key), so the raw-key hex never stays in
-// the filename handed to sqlite3_open_v2.
+// mirrors isKeyParamName, so every spelling Open accepted as the key is
+// stripped and the raw-key hex never stays in the filename handed to
+// sqlite3_open_v2.
 func stripKeyParam(query string) string {
 	segs := strings.Split(query, "&")
 	kept := make([]string, 0, len(segs))

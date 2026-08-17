@@ -502,9 +502,13 @@ func TestStripKeyParam(t *testing.T) {
 		{"a=1&%5Fkey=abcd&b=2", "a=1&b=2"},
 		{"_key", ""},
 		{"%5Fkey", ""},
-		// _key-suffixed spellings are treated as the key parameter and stripped.
-		{"x_key=abcd", ""},
-		{"a%5Fkey=abcd", ""},
+		// Only exact _key (any case) and the "?_key" typo spelling are keys;
+		// other "_key"-suffixed names are ordinary parameters.
+		{"x_key=abcd", "x_key=abcd"},
+		{"a%5Fkey=abcd", "a%5Fkey=abcd"},
+		{"?_key=abcd", ""},
+		{"%3F_key=abcd", ""},
+		{"a=1&?_key=abcd&b=2", "a=1&b=2"},
 		{"ke%79=1", "ke%79=1"},
 		{"", ""},
 	}
@@ -877,4 +881,46 @@ func TestSQLCipherExportRoundTrip(t *testing.T) {
 		t.Fatalf("got %q, want %q", v, "b")
 	}
 	dst.Close()
+}
+
+// TestDSNKey_SuffixedNamesNotKeyParams: only exact _key (case-insensitive)
+// and the "?_key" typo spelling key the database; unrelated "_key"-suffixed
+// parameters such as a custom VFS's kms_key must be inert.
+func TestDSNKey_SuffixedNamesNotKeyParams(t *testing.T) {
+	requireCodec(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "t.db")
+	key := []byte("0123456789abcdef0123456789abcdef")
+
+	// A valid raw-key hex under an unrelated name must NOT key the file.
+	db, err := sql.Open("sqlite3", path+"?kms_key="+hex.EncodeToString(key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("CREATE TABLE t (v TEXT); INSERT INTO t VALUES ('k')"); err != nil {
+		t.Fatalf("kms_key param broke the open: %v", err)
+	}
+	db.Close()
+	plain, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v string
+	if err := plain.QueryRow("SELECT v FROM t").Scan(&v); err != nil {
+		t.Fatalf("database was keyed via kms_key: %v", err)
+	}
+	if v != "k" {
+		t.Fatalf("got %q, want %q", v, "k")
+	}
+	plain.Close()
+
+	// Non-hex junk under an unrelated name must not error either.
+	junk, err := sql.Open("sqlite3", filepath.Join(dir, "j.db")+"?kms_key=zzz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := junk.Exec("CREATE TABLE t (v TEXT)"); err != nil {
+		t.Fatalf("kms_key=zzz broke the open: %v", err)
+	}
+	junk.Close()
 }
