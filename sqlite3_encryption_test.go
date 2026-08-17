@@ -491,3 +491,82 @@ func TestKeyedOpenRefusedWithoutCodec(t *testing.T) {
 	}
 	dsn.Close()
 }
+
+func TestStripKeyParam(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"_key=abcd", ""},
+		{"%5Fkey=abcd", ""},
+		{"%5fkey=abcd", ""},
+		{"a=1&_key=abcd&b=2", "a=1&b=2"},
+		{"a=1&%5Fkey=abcd&b=2", "a=1&b=2"},
+		{"_key", ""},
+		{"%5Fkey", ""},
+		{"x_key=abcd", "x_key=abcd"},
+		{"a%5Fkey=abcd", "a%5Fkey=abcd"},
+		{"ke%79=1", "ke%79=1"},
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := stripKeyParam(c.in); got != c.want {
+			t.Errorf("stripKeyParam(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestDSNKey_EncodedNameFileURI(t *testing.T) {
+	requireCodec(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.db")
+	key := []byte("0123456789abcdef0123456789abcdef")
+	uri := "file:" + path + "?%5Fkey=" + hex.EncodeToString(key)
+
+	db, err := sql.Open("sqlite3", uri)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("CREATE TABLE t (v TEXT); INSERT INTO t VALUES ('enc')"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db2, err := sql.Open("sqlite3", uri)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v string
+	if err := db2.QueryRow("SELECT v FROM t").Scan(&v); err != nil {
+		t.Fatal(err)
+	}
+	if v != "enc" {
+		t.Fatalf("got %q, want %q", v, "enc")
+	}
+	db2.Close()
+
+	wrong := []byte("ffffffffffffffffffffffffffffffff")
+	bad, err := sql.Open("sqlite3", "file:"+path+"?%5Fkey="+hex.EncodeToString(wrong))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bad.Ping(); err == nil {
+		bad.Close()
+		t.Fatal("wrong encoded _key unexpectedly pinged the database")
+	}
+	bad.Close()
+}
+
+func TestDSNKey_ParamErrorAfterDecode(t *testing.T) {
+	dir := t.TempDir()
+	key := []byte("0123456789abcdef0123456789abcdef")
+	db, err := sql.Open("sqlite3",
+		filepath.Join(dir, "t.db")+"?_key="+hex.EncodeToString(key)+"&_mutex=bogus")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	_, err = db.Query("SELECT 1")
+	if err == nil || !strings.Contains(err.Error(), "Invalid _mutex") {
+		t.Fatalf("got %v, want Invalid _mutex error", err)
+	}
+}

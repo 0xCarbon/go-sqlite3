@@ -8,6 +8,9 @@ set -e
 
 cd "$(dirname "$0")/.."
 
+echo "Error: upgrade.sh is disabled in the 0xCarbon fork: it would regenerate a plain-SQLite amalgamation and clobber the SQLCipher binding. Use upgrade/sqlcipher.sh instead." >&2
+exit 1
+
 CURRENT_VERSION=$(grep '#define SQLITE_VERSION_NUMBER' sqlite3-binding.c | grep -o '[0-9]\{7\}')
 
 go run upgrade/upgrade.go

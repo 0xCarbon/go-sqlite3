@@ -1234,7 +1234,15 @@ func stripKeyParam(query string) string {
 	segs := strings.Split(query, "&")
 	kept := make([]string, 0, len(segs))
 	for _, seg := range segs {
-		if strings.HasPrefix(seg, "_key=") || seg == "_key" {
+		name := seg
+		if i := strings.IndexByte(seg, '='); i >= 0 {
+			name = seg[:i]
+		}
+		// Open inspects parameters through url.ParseQuery, which decodes
+		// names before use: %5Fkey (and any other spelling of _key) must
+		// be stripped too, or the raw-key hex stays in the filename
+		// handed to sqlite3_open_v2.
+		if dec, err := url.QueryUnescape(name); err == nil && dec == "_key" {
 			continue
 		}
 		kept = append(kept, seg)
@@ -1303,6 +1311,15 @@ func (d *SQLiteDriver) Open(dsn string) (driver.Conn, error) {
 			if err != nil {
 				return nil, fmt.Errorf("Invalid _key: %v", err)
 			}
+			// dsnKey is a decoded copy of the _key DSN parameter; wipe it
+			// on every return path after this point, whichever branch
+			// consumes or ignores it. The DSN string itself is
+			// caller-owned and cannot be scrubbed here.
+			defer func() {
+				for i := range dsnKey {
+					dsnKey[i] = 0
+				}
+			}()
 		}
 
 		// Authentication
@@ -1765,13 +1782,6 @@ func (d *SQLiteDriver) Open(dsn string) (driver.Conn, error) {
 			return fail(err)
 		}
 	}
-	// dsnKey is a decoded copy of the _key DSN parameter; wipe it whichever
-	// branch consumed or ignored it. The DSN string itself is caller-owned
-	// and cannot be scrubbed here.
-	for i := range dsnKey {
-		dsnKey[i] = 0
-	}
-
 	// A keyed open is meaningless without a codec: on plain SQLite builds
 	// PRAGMA key is silently ignored and the database would be created or
 	// read as plaintext. Refuse instead.
