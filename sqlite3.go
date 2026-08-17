@@ -1820,7 +1820,20 @@ func (d *SQLiteDriver) Open(dsn string) (driver.Conn, error) {
 			return fail(err)
 		}
 	case d.EncryptionKey != "":
-		if err := exec("PRAGMA key = " + d.EncryptionKey + ";"); err != nil {
+		// Build the statement piecewise into one zeroized buffer instead
+		// of concatenating strings: the concatenation would materialize an
+		// immutable Go copy of the key on every open. The value is a SQL
+		// literal supplied by the caller (e.g. "x'<hex>'" or a quoted
+		// passphrase).
+		const prefix = "PRAGMA key = "
+		const suffix = ";"
+		k := d.EncryptionKey
+		// The trailing NUL comes from make's zero fill.
+		buf := make([]byte, len(prefix)+len(k)+len(suffix)+1)
+		copy(buf, prefix)
+		copy(buf[len(prefix):], k)
+		copy(buf[len(prefix)+len(k):], suffix)
+		if err := execBuf(buf); err != nil {
 			return fail(err)
 		}
 	case len(dsnKey) > 0:
