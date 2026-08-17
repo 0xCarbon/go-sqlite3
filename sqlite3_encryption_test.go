@@ -14,6 +14,7 @@ import (
 	"database/sql/driver"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -809,4 +810,66 @@ func TestBackupAfterCloseNoPanic(t *testing.T) {
 	if err := backup.Close(); err != nil {
 		t.Logf("second close: %v", err)
 	}
+}
+
+// TestSQLCipherExportRoundTrip covers the consumers' documented decrypt and
+// rekey path: ATTACH a second database with a raw key and sqlcipher_export
+// into it. The destination must be readable only with its own key.
+func TestSQLCipherExportRoundTrip(t *testing.T) {
+	requireCodec(t)
+	dir := t.TempDir()
+	srcPath := filepath.Join(dir, "src.db")
+	dstPath := filepath.Join(dir, "dst.db")
+	srcKey := []byte("0123456789abcdef0123456789abcdef")
+	dstKey := []byte("fedcba9876543210fedcba9876543210")
+
+	src := openWithKeyBytes(t, srcPath, srcKey)
+	if _, err := src.Exec(`CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT);
+		INSERT INTO t (v) VALUES ('a'), ('b'), ('c')`); err != nil {
+		t.Fatal(err)
+	}
+	// The attach key must be a quoted SQL string containing the x'...'
+	// raw-key form; a bare blob literal silently falls back to key
+	// derivation (see the fork README).
+	stmt := fmt.Sprintf("ATTACH DATABASE ? AS dst KEY ?")
+	if _, err := src.Exec(stmt, dstPath, "x'"+hex.EncodeToString(dstKey)+"'"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := src.Exec("SELECT sqlcipher_export('dst')"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := src.Exec("DETACH DATABASE dst"); err != nil {
+		t.Fatal(err)
+	}
+	if err := src.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Destination must be encrypted and readable only with dstKey.
+	plain, err := sql.Open("sqlite3", dstPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := plain.Query("SELECT COUNT(*) FROM t"); err == nil {
+		plain.Close()
+		t.Fatal("plain open unexpectedly read the exported database")
+	}
+	plain.Close()
+
+	dst := openWithKeyBytes(t, dstPath, dstKey)
+	var n int
+	if err := dst.QueryRow("SELECT COUNT(*) FROM t").Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 3 {
+		t.Fatalf("got %d rows, want 3", n)
+	}
+	var v string
+	if err := dst.QueryRow("SELECT v FROM t WHERE id = 2").Scan(&v); err != nil {
+		t.Fatal(err)
+	}
+	if v != "b" {
+		t.Fatalf("got %q, want %q", v, "b")
+	}
+	dst.Close()
 }
