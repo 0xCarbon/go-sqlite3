@@ -1341,6 +1341,20 @@ func (d *SQLiteDriver) Open(dsn string) (driver.Conn, error) {
 			}()
 		}
 
+		// SQLite itself parses key=/hexkey=/textkey= URI parameters on
+		// file: DSNs and applies them at open: that path has none of the
+		// fork's validation (raw-key lengths), zeroization, or
+		// codec-presence refusal, and the key text persists in the
+		// retained URI for the connection lifetime. Reject them so the
+		// only keying surface is _key/EncryptionKey/EncryptionKeyBytes.
+		if strings.HasPrefix(dsn, "file:") {
+			for name := range params {
+				if strings.EqualFold(name, "key") || strings.EqualFold(name, "hexkey") || strings.EqualFold(name, "textkey") {
+					return nil, fmt.Errorf("sqlite3: DSN parameter %q is not supported; pass SQLCipher keys via _key=<hex>, EncryptionKey or EncryptionKeyBytes", name)
+				}
+			}
+		}
+
 		// Authentication
 		if _, ok := params["_auth"]; ok {
 			authCreate = true

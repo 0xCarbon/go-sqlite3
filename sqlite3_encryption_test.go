@@ -676,3 +676,38 @@ func TestDSNKey_MisspellingRefusedWithoutCodec(t *testing.T) {
 		t.Fatalf("got %v, want codec-unavailable refusal for misspelled _key", err)
 	}
 }
+
+func TestDSNKey_SQLiteNativeKeyParamsRejected(t *testing.T) {
+	dir := t.TempDir()
+	for _, q := range []string{
+		"key=passphrase", "hexkey=0102", "textkey=pass", "KEY=pass", "HexKey=0102", "TEXTKEY=pass",
+	} {
+		db, err := sql.Open("sqlite3", "file:"+filepath.Join(dir, "t.db")+"?"+q)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Query("SELECT 1"); err == nil || !strings.Contains(err.Error(), "is not supported") {
+			t.Fatalf("file: DSN with %q: got %v, want rejection", q, err)
+		}
+		db.Close()
+	}
+	// A benign file: parameter is untouched.
+	db, err := sql.Open("sqlite3", "file:"+filepath.Join(dir, "ok.db")+"?cache=shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("CREATE TABLE t (v TEXT)"); err != nil {
+		t.Fatalf("benign file: param rejected: %v", err)
+	}
+	db.Close()
+	// Non-file DSNs never reach SQLite's URI parser: key=junk there is an
+	// ordinary (ignored, stripped) query parameter, not a keying attempt.
+	plain, err := sql.Open("sqlite3", filepath.Join(dir, "p.db")+"?key=junk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := plain.Exec("CREATE TABLE t (v TEXT)"); err != nil {
+		t.Fatalf("plain DSN with key= param failed: %v", err)
+	}
+	plain.Close()
+}
