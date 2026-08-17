@@ -76,6 +76,22 @@ _sqlite3_open_v2(const char *filename, sqlite3 **ppDb, int flags, const char *zV
 #endif
 }
 
+// _sqlite3_codec_available reports whether the linked SQLite build provides
+// the SQLCipher codec: PRAGMA cipher_version returns a row only on codec
+// builds. Used to refuse keyed opens on plain builds (e.g. -tags libsqlite3
+// against a system libsqlite3) instead of silently operating unencrypted.
+static int
+_sqlite3_codec_available(sqlite3 *db) {
+  sqlite3_stmt *stmt = NULL;
+  int rc = sqlite3_prepare_v2(db, "PRAGMA cipher_version", -1, &stmt, NULL);
+  if (rc != SQLITE_OK) {
+    return 0;
+  }
+  rc = sqlite3_step(stmt);
+  sqlite3_finalize(stmt);
+  return rc == SQLITE_ROW;
+}
+
 static int
 _sqlite3_bind_text(sqlite3_stmt *stmt, int n, char *p, sqlite3_uint64 np) {
   return sqlite3_bind_text64(stmt, n, p, np, SQLITE_TRANSIENT, SQLITE_UTF8);
@@ -1706,6 +1722,15 @@ func (d *SQLiteDriver) Open(dsn string) (driver.Conn, error) {
 		}
 		if err != nil {
 			return fail(err)
+		}
+	}
+
+	// A keyed open is meaningless without a codec: on plain SQLite builds
+	// PRAGMA key is silently ignored and the database would be created or
+	// read as plaintext. Refuse instead.
+	if len(d.EncryptionKeyBytes) > 0 || d.EncryptionKey != "" || len(dsnKey) > 0 {
+		if C._sqlite3_codec_available(db) != 1 {
+			return fail(errors.New("sqlite3: keyed open refused: SQLCipher codec not available in this build"))
 		}
 	}
 

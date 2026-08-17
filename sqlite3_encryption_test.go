@@ -16,6 +16,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -328,4 +329,42 @@ func TestDSNKey_DriverFieldTakesPrecedence(t *testing.T) {
 		t.Fatal(err)
 	}
 	ok.Close()
+}
+
+// TestKeyedOpenRefusedWithoutCodec verifies that a keyed open fails loudly on
+// builds without the SQLCipher codec (e.g. -tags libsqlite3 against a plain
+// system libsqlite3) instead of silently operating unencrypted.
+func TestKeyedOpenRefusedWithoutCodec(t *testing.T) {
+	probe, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var version string
+	perr := probe.QueryRow("PRAGMA cipher_version").Scan(&version)
+	probe.Close()
+	if perr == nil {
+		t.Skip("codec available in this build; refusal path not reachable")
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "t.db")
+	key := []byte("0123456789abcdef0123456789abcdef")
+
+	db := openWithKeyBytes(t, path, key)
+	_, err = db.Exec("CREATE TABLE t (v TEXT)")
+	if err == nil || !strings.Contains(err.Error(), "SQLCipher codec not available") {
+		db.Close()
+		t.Fatalf("EncryptionKeyBytes open: got %v, want codec-unavailable refusal", err)
+	}
+	db.Close()
+
+	dsn, err := sql.Open("sqlite3", path+"?_key="+hex.EncodeToString(key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dsn.Query("SELECT 1"); err == nil || !strings.Contains(err.Error(), "SQLCipher codec not available") {
+		dsn.Close()
+		t.Fatalf("_key DSN open: got %v, want codec-unavailable refusal", err)
+	}
+	dsn.Close()
 }
