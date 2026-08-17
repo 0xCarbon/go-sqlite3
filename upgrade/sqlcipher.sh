@@ -53,13 +53,18 @@ echo "Bundling SQLCipher $VERSION (currently ${CURRENT:-none})"
 # pinned commit, so a retagged release cannot serve different source. When
 # bundling a new version, add its pin here first (after cloning the tag,
 # git -C <dir> rev-parse HEAD).
-PINNED_COMMIT_4_17_0=810db22f575ee7cf94ea96a3e91622b5fcece3dc
-pin_var="PINNED_COMMIT_$(echo "${VERSION#v}" | tr . _)"
-PIN=$(eval "echo \$$pin_var")
+#
+# Deliberately an explicit case table, not an indirect variable lookup:
+# the version string arrives from git ls-remote auto-discovery or argv,
+# git permits \$(), and eval-based lookup would execute it.
+PIN=""
+case "${VERSION#v}" in
+4.17.0) PIN=810db22f575ee7cf94ea96a3e91622b5fcece3dc ;;
+esac
 if [ -z "$PIN" ]; then
   echo "Error: no pinned commit for SQLCipher $VERSION." >&2
-  echo "Add $pin_var=<commit> to upgrade/sqlcipher.sh first" \
-    "(git ls-remote --tags --refs https://github.com/sqlcipher/sqlcipher '$VERSION')." >&2
+  echo "Add a case entry for ${VERSION#v} to upgrade/sqlcipher.sh first" \
+    "(clone the tag, then git -C <dir> rev-parse HEAD)." >&2
   exit 1
 fi
 
