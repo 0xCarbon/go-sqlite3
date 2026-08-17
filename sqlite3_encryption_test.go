@@ -711,3 +711,102 @@ func TestDSNKey_SQLiteNativeKeyParamsRejected(t *testing.T) {
 	}
 	plain.Close()
 }
+
+func TestDSNEmptyPathRejected(t *testing.T) {
+	dir := t.TempDir()
+	key := []byte("0123456789abcdef0123456789abcdef")
+	db, err := sql.Open("sqlite3", "?_key="+hex.EncodeToString(key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Query("SELECT 1"); err == nil || !strings.Contains(err.Error(), "missing database path") {
+		t.Fatalf("got %v, want missing-database-path error", err)
+	}
+	db.Close()
+	// No file may have been created anywhere with the key hex in its name.
+	entries, readErr := os.ReadDir(".")
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	_ = dir
+	_ = entries
+	if _, err := os.Stat("?_key=" + hex.EncodeToString(key)); err == nil {
+		t.Fatal("plaintext file named after the key hex was created")
+	}
+}
+
+func TestDSNKey_TooLongRejected(t *testing.T) {
+	db, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "t.db")+"?_key="+strings.Repeat("ab", 200))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Query("SELECT 1"); err == nil || !strings.Contains(err.Error(), "Invalid _key: too long") {
+		t.Fatalf("got %v, want Invalid _key: too long", err)
+	}
+}
+
+func TestBackupAfterCloseNoPanic(t *testing.T) {
+	tempDir := t.TempDir()
+	srcPath := filepath.Join(tempDir, "src.db")
+	dstPath := filepath.Join(tempDir, "dst.db")
+
+	src, err := sql.Open("sqlite3", srcPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Close()
+	if _, err := src.Exec("CREATE TABLE t (v TEXT); INSERT INTO t VALUES ('x')"); err != nil {
+		t.Fatal(err)
+	}
+
+	dst := sql.OpenDB(&testConnector{d: &SQLiteDriver{}, dsn: dstPath})
+	defer dst.Close()
+	srcC := sql.OpenDB(&testConnector{d: &SQLiteDriver{}, dsn: srcPath})
+	defer srcC.Close()
+
+	// Grab the raw conns to run a backup.
+	var backup *SQLiteBackup
+	dstConn, err := dst.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dstConn.Close()
+	srcConn, err := srcC.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srcConn.Close()
+	err = dstConn.Raw(func(dc any) error {
+		return srcConn.Raw(func(sc any) error {
+			var berr error
+			backup, berr = dc.(*SQLiteConn).Backup("main", sc.(*SQLiteConn), "main")
+			return berr
+		})
+	})
+	if err != nil {
+		t.Fatalf("backup init: %v", err)
+	}
+	if _, err := backup.Step(-1); err != nil {
+		t.Fatalf("backup step: %v", err)
+	}
+	if err := backup.Close(); err != nil {
+		t.Fatalf("backup close: %v", err)
+	}
+
+	// After Close the handle is nil: these must not SIGSEGV.
+	if _, err := backup.Step(1); err == nil || err.(Error).Code != ErrMisuse {
+		t.Fatalf("Step after Close: got %v, want ErrMisuse", err)
+	}
+	if backup.Remaining() != 0 {
+		t.Fatal("Remaining after Close: want 0")
+	}
+	if backup.PageCount() != 0 {
+		t.Fatal("PageCount after Close: want 0")
+	}
+	// Double Close must stay safe (finish on NULL is a no-op upstream of
+	// the guard as well; Close is idempotent via b.b == nil).
+	if err := backup.Close(); err != nil {
+		t.Logf("second close: %v", err)
+	}
+}

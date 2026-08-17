@@ -1294,6 +1294,13 @@ func (d *SQLiteDriver) Open(dsn string) (driver.Conn, error) {
 	var dsnKey []byte
 
 	pos := strings.IndexRune(dsn, '?')
+	if pos == 0 {
+		// A DSN starting with '?' has an empty path: parameters would
+		// never be parsed and the whole string would become the filename,
+		// creating an unencrypted database literally named after the raw
+		// query (including any _key hex).
+		return nil, errors.New("Invalid DSN: missing database path before query parameters")
+	}
 	if pos >= 1 {
 		params, err := url.ParseQuery(dsn[pos+1:])
 		if err != nil {
@@ -1323,6 +1330,12 @@ func (d *SQLiteDriver) Open(dsn string) (driver.Conn, error) {
 		}
 		if len(keyVals) == 1 {
 			val := keyVals[0]
+			// Cap before decoding: raw keys are at most 80 bytes (160 hex
+			// chars); rejecting oversized values early avoids allocating
+			// ~1.5x the parameter size for garbage input.
+			if len(val) > 160 {
+				return nil, errors.New("Invalid _key: too long")
+			}
 			if val == "" {
 				return nil, errors.New("Invalid _key: empty value")
 			}

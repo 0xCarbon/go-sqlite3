@@ -44,6 +44,9 @@ func (destConn *SQLiteConn) Backup(dest string, srcConn *SQLiteConn, src string)
 // and an error signalling any other error. Done is returned if the underlying
 // C function returns SQLITE_DONE (Code 101)
 func (b *SQLiteBackup) Step(p int) (bool, error) {
+	if b.b == nil {
+		return false, Error{Code: ErrMisuse}
+	}
 	ret := C.sqlite3_backup_step(b.b, C.int(p))
 	if ret == C.SQLITE_DONE {
 		return true, nil
@@ -55,11 +58,17 @@ func (b *SQLiteBackup) Step(p int) (bool, error) {
 
 // Remaining return whether have the rest for backup.
 func (b *SQLiteBackup) Remaining() int {
+	if b.b == nil {
+		return 0
+	}
 	return int(C.sqlite3_backup_remaining(b.b))
 }
 
 // PageCount return count of pages.
 func (b *SQLiteBackup) PageCount() int {
+	if b.b == nil {
+		return 0
+	}
 	return int(C.sqlite3_backup_pagecount(b.b))
 }
 
