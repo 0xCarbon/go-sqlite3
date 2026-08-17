@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/mattn/go-sqlite3"
+	"github.com/0xCarbon/go-sqlite3"
 )
 
 type seriesModule struct{}
