@@ -3,6 +3,13 @@ Package sqlite3 provides interface to SQLite3 databases.
 
 This works as a driver for database/sql.
 
+This is the 0xCarbon fork of mattn/go-sqlite3: it bundles the SQLCipher
+amalgamation so every database can be encrypted at rest (see the README's
+"0xCarbon fork: SQLCipher" section for key configuration). Because SQLCipher
+is a C library linked against libcrypto, this driver requires CGO — there is
+no pure-Go build. The amalgamation is generated from the vendored
+0xCarbon/sqlcipher mirror by upgrade/sqlcipher.sh.
+
 Installation
 
 	go get github.com/0xCarbon/go-sqlite3

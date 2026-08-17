@@ -1,24 +1,60 @@
-go-sqlite3
-==========
+go-sqlite3 (0xCarbon fork — SQLCipher)
+======================================
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/mattn/go-sqlite3.svg)](https://pkg.go.dev/github.com/mattn/go-sqlite3)
-[![GitHub Actions](https://github.com/mattn/go-sqlite3/workflows/Go/badge.svg)](https://github.com/mattn/go-sqlite3/actions?query=workflow%3AGo)
-[![Financial Contributors on Open Collective](https://opencollective.com/mattn-go-sqlite3/all/badge.svg?label=financial+contributors)](https://opencollective.com/mattn-go-sqlite3) 
-[![codecov](https://codecov.io/gh/mattn/go-sqlite3/branch/master/graph/badge.svg)](https://codecov.io/gh/mattn/go-sqlite3)
-[![Go Report Card](https://goreportcard.com/badge/github.com/mattn/go-sqlite3)](https://goreportcard.com/report/github.com/mattn/go-sqlite3)
+[![Go Reference](https://pkg.go.dev/badge/github.com/0xCarbon/go-sqlite3.svg)](https://pkg.go.dev/github.com/0xCarbon/go-sqlite3)
+[![GitHub Actions](https://github.com/0xCarbon/go-sqlite3/workflows/Go/badge.svg)](https://github.com/0xCarbon/go-sqlite3/actions?query=workflow%3AGo)
 
-## Sponsors
+A [mattn/go-sqlite3](https://github.com/mattn/go-sqlite3) `database/sql`
+driver with **SQLCipher encryption built in**: this fork exists to provide
+at-rest-encrypted SQLite to Go services, tracking upstream `master` and
+bundling the [SQLCipher](https://github.com/sqlcipher/sqlcipher) amalgamation
+so every build encrypts by default through OpenSSL (libcrypto).
 
-This project is proudly sponsored by:
+## Why a CGo driver (and not a pure-Go SQLite)
 
-<a href="https://coderabbit.link/mattn">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://victorious-bubble-f69a016683.media.strapiapp.com/White_Typemark_79b9189d19.svg">
-    <img src="https://victorious-bubble-f69a016683.media.strapiapp.com/Orange_Typemark_43bf516c9d.svg" alt="CodeRabbit" width="320">
-  </picture>
-</a>
+Encryption is the reason this fork is — and must remain — a **CGo** driver:
 
-Latest stable version is v1.14 or later, not v2.
+- SQLCipher is a C library: a codec layer (`sqlite3Codec*`, `sqlcipher_*`,
+  KDF/HMAC/rand sources, an OpenSSL crypto provider) layered onto the SQLite
+  amalgamation. It is compiled into the bundled `sqlite3-binding.c` and linked
+  against `libcrypto` — only CGo can do that.
+- The pure-Go alternative, [modernc.org/sqlite](https://gitlab.com/cznic/sqlite),
+  is a machine-translated SQLite with **no codec**: as of v1.56.0 it contains
+  no SQLCipher support, no `SQLITE_HAS_CODEC` build, and no encryption API
+  surface. There is currently no pure-Go way to open or create SQLCipher
+  databases.
+
+Consequence: builds require CGO_ENABLED=1, a C compiler, and OpenSSL
+headers+libs (`libssl-dev` / `openssl-dev` / `openssl@3` / `mingw-w64-…-openssl`).
+
+## Amalgamation provenance (supply chain)
+
+The bundled SQLCipher amalgamation is generated from
+[0xCarbon/sqlcipher](https://github.com/0xCarbon/sqlcipher) — this
+organization's vendored mirror of `sqlcipher/sqlcipher` — by
+[`upgrade/sqlcipher.sh`](./upgrade/sqlcipher.sh). The script pins each bundled
+release to its exact upstream commit (the commit the annotated tag points
+at), verifies the clone lands on it, and fails closed for unpinned versions.
+`upgrade/check.sh` reports the bundled vs. latest upstream SQLCipher version.
+
+## Consuming
+
+```go
+// direct
+import _ "github.com/0xCarbon/go-sqlite3"
+
+// or as a drop-in for existing mattn imports
+replace github.com/mattn/go-sqlite3 => github.com/0xCarbon/go-sqlite3 v1.15.1
+```
+
+Keys: `SQLiteDriver.EncryptionKeyBytes` (raw 32/48/80-byte keys),
+`SQLiteDriver.EncryptionKey` (SQL-literal strings), or `_key=<hex>` in the DSN —
+see [Opening encrypted databases](#opening-encrypted-databases-rules-and-caveats)
+below. Upstream's full documentation follows.
+
+---
+
+Latest stable version is v1.15 or later, not v2.
 
 # Description
 
@@ -62,10 +98,12 @@ buffers, including the C copies). Keyed opens verify `PRAGMA cipher_version` and
 linked build has no codec (for example `-tags libsqlite3` against a plain
 system libsqlite3) instead of silently operating unencrypted.
 
-To upgrade the bundled amalgamation, run `upgrade/sqlcipher.sh` (see
-`upgrade/check.sh` for the current vs. latest SQLCipher version). The
-`libsqlite3` build tag links the system library instead of the amalgamation;
-encryption then requires a SQLCipher build of that system library.
+To upgrade the bundled amalgamation, run `upgrade/sqlcipher.sh` — it builds
+from the vendored [0xCarbon/sqlcipher](https://github.com/0xCarbon/sqlcipher)
+mirror with commit-pinned provenance (`upgrade/check.sh` reports the current
+vs. latest upstream version). The `libsqlite3` build tag links the system
+library instead of the amalgamation; encryption then requires a SQLCipher
+build of that system library.
 
 The canonical branch for fork work is `master`; `feat/sqlcipher-encryption-key`
 is frozen history that `master` already contains.
@@ -217,7 +255,7 @@ Boolean values can be one of:
 | Busy Timeout | `_busy_timeout` \| `_timeout` | `int` | Specify value for sqlite3_busy_timeout. For more information see [PRAGMA busy_timeout](https://www.sqlite.org/pragma.html#pragma_busy_timeout) |
 | Case Sensitive LIKE | `_case_sensitive_like` \| `_cslike` | `boolean` | For more information see [PRAGMA case_sensitive_like](https://www.sqlite.org/pragma.html#pragma_case_sensitive_like) |
 | Defer Foreign Keys | `_defer_foreign_keys` \| `_defer_fk` | `boolean` | For more information see [PRAGMA defer_foreign_keys](https://www.sqlite.org/pragma.html#pragma_defer_foreign_keys) |
-| Encryption Key | `_key` | `hex string` | 0xCarbon fork: raw SQLCipher key, hex-encoded; must decode to 32, 48 or 80 bytes (`PRAGMA key = "x'...'"` form, key derivation skipped). Lower precedence than the `EncryptionKeyBytes`/`EncryptionKey` driver fields. Invalid, empty or duplicate values fail the open. Keys embedded in the DSN cannot be scrubbed from memory; prefer `EncryptionKeyBytes` for sensitive keys. |
+| Encryption Key | `_key` | `hex string` | 0xCarbon fork: raw SQLCipher key, hex-encoded; must decode to 32, 48 or 80 bytes (`PRAGMA key = "x'...'"` form, key derivation skipped). Matched case-insensitively as the exact name `_key` (plus the `??_key` doubled-separator typo); other `_key`-suffixed parameters are inert. Lower precedence than the `EncryptionKeyBytes`/`EncryptionKey` driver fields. Invalid, empty or duplicate values fail the open. Keys embedded in the DSN cannot be scrubbed from memory; prefer `EncryptionKeyBytes` for sensitive keys. |
 | Foreign Keys | `_foreign_keys` \| `_fk` | `boolean` | For more information see [PRAGMA foreign_keys](https://www.sqlite.org/pragma.html#pragma_foreign_keys) |
 | Ignore CHECK Constraints | `_ignore_check_constraints` | `boolean` | For more information see [PRAGMA ignore_check_constraints](https://www.sqlite.org/pragma.html#pragma_ignore_check_constraints) |
 | Immutable | `immutable` | `boolean` | For more information see [Immutable](https://www.sqlite.org/c3ref/open.html) |

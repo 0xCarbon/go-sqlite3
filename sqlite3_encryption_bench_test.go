@@ -12,7 +12,9 @@ import (
 	"context"
 	"database/sql/driver"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -55,13 +57,20 @@ func benchQueryRows(tb testing.TB, c *SQLiteConn, query string) error {
 		return err
 	}
 	dest := make([]driver.Value, len(rows.Columns()))
+	var stepErr error
 	for {
 		if err := rows.Next(dest); err != nil {
+			// io.EOF is the clean end of rows; anything else is a
+			// step-time failure the caller must see, or the benchmark
+			// silently times an operation that never succeeded.
+			if !errors.Is(err, io.EOF) {
+				stepErr = err
+			}
 			break
 		}
 	}
 	rows.Close()
-	return nil
+	return stepErr
 }
 
 // benchPopulate fills a conn with a table of n rows of ~60 byte payloads.
@@ -260,6 +269,7 @@ func BenchmarkBackupCipher(b *testing.B) {
 			if err != nil {
 				b.Fatal(err)
 			}
+			defer src.Close()
 			benchPopulate(b, src.(*SQLiteConn), rowCount)
 
 			destDriver := &SQLiteDriver{}
@@ -383,5 +393,31 @@ func BenchmarkStmtCacheKeyed(b *testing.B) {
 				}
 			})
 		}
+	}
+}
+
+// TestBenchQueryRowsSurfacesStepError: benchQueryRows must return step-time
+// failures, not treat them as normal row termination — otherwise benchmarks
+// silently time failed operations.
+func TestBenchQueryRowsSurfacesStepError(t *testing.T) {
+	conn, err := (&SQLiteDriver{}).Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	c := conn.(*SQLiteConn)
+	// Two rows; the second is invalid JSON, which fails when STEPPED (the
+	// json() call is evaluated per row), not when the statement is prepared.
+	if err := benchQueryRows(t, c, "CREATE TABLE j (v TEXT)"); err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range []string{`{"ok": 1}`, `not-json`} {
+		if err := benchQueryRows(t, c, "INSERT INTO j VALUES ('"+v+"')"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	err = benchQueryRows(t, c, "SELECT json(v) FROM j ORDER BY rowid")
+	if err == nil {
+		t.Fatal("benchQueryRows swallowed the step-time error")
 	}
 }

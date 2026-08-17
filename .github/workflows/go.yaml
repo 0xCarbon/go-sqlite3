@@ -34,35 +34,21 @@ jobs:
         with:
           go-version: ${{ matrix.go }}
 
-      - name: Get Build Tools
-        run: |
-          GO111MODULE=on go install github.com/ory/go-acc@latest
-
-      - name: Add $GOPATH/bin to $PATH
-        run: |
-          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
-
       - uses: actions/checkout@v6
 
+      # The fork has no codecov token: go-acc + codecov upload were silent
+      # tokenless no-ops, so this runs plain go test.
       - name: 'Tags: default'
-        run: go-acc . -- -race -v -tags ""
+        run: go test -count=1 -race -tags ""
 
       - name: 'Tags: libsqlite3'
-        run: go-acc . -- -race -v -tags "libsqlite3"
+        run: go test -count=1 -race -tags "libsqlite3"
 
       - name: 'Tags: full'
-        run: go-acc . -- -race -v -tags "sqlite_allow_uri_authority sqlite_app_armor sqlite_column_metadata sqlite_foreign_keys sqlite_fts5 sqlite_icu sqlite_introspect sqlite_json sqlite_math_functions sqlite_os_trace sqlite_preupdate_hook sqlite_secure_delete sqlite_see sqlite_stat4 sqlite_trace sqlite_unlock_notify sqlite_vacuum_incr sqlite_vtable"
+        run: go test -count=1 -race -tags "sqlite_allow_uri_authority sqlite_app_armor sqlite_column_metadata sqlite_foreign_keys sqlite_fts5 sqlite_icu sqlite_introspect sqlite_json sqlite_math_functions sqlite_os_trace sqlite_preupdate_hook sqlite_secure_delete sqlite_see sqlite_stat4 sqlite_trace sqlite_unlock_notify sqlite_vacuum_incr sqlite_vtable"
 
       - name: 'Tags: vacuum'
-        run: go-acc . -- -race -v -tags "sqlite_vacuum_full"
-
-      # Best-effort tokenless upload on this fork; coverage may not land
-      # without a CODECOV_TOKEN secret (owner follow-up).
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v5
-        with:
-          env_vars: OS,GO
-          file: coverage.txt
+        run: go test -count=1 -race -tags "sqlite_vacuum_full"
 
   test-windows:
     name: Test for Windows
@@ -122,10 +108,16 @@ jobs:
         run: go build -race -v -tags "sqlite_vacuum_full"
         shell: msys2 {0}
 
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v5
-        with:
-          env_vars: OS,GO
-          file: coverage.txt
+  # Advisory freshness check for the bundled SQLCipher amalgamation: reports
+  # (without failing CI) when upstream has published a release the fork has
+  # not bundled yet. Bump via upgrade/sqlcipher.sh + upgrade/check.sh.
+  sqlcipher-freshness:
+    name: SQLCipher freshness (advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check bundled SQLCipher version
+        run: sh upgrade/check.sh
 
 # based on: github.com/koron-go/_skeleton/.github/workflows/go.yml
