@@ -23,9 +23,12 @@ set -e
 cd "$(dirname "$0")/.."
 
 if [ -n "$1" ]; then
-  VERSION="$1"
+  # Accept both 4.17.0 and v4.17.0.
+  VERSION="v${1#v}"
 else
-  VERSION=$(git ls-remote --tags --sort=-v:refname \
+  # --refs: without it the peeled annotated-tag refs (refs/tags/vX.Y.Z^{})
+  # match the glob and version-sort above the plain tags.
+  VERSION=$(git ls-remote --tags --refs --sort=-v:refname \
     https://github.com/sqlcipher/sqlcipher 'v4.*' |
     head -n 1 | sed 's|.*refs/tags/||')
 fi
@@ -38,7 +41,7 @@ fi
 CURRENT=$(grep -m1 '#define CIPHER_VERSION_NUMBER' sqlite3-binding.c | \
   grep -o '[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*')
 
-if [ "$CURRENT" = "$VERSION" ]; then
+if [ "$CURRENT" = "${VERSION#v}" ]; then
   echo "Already up to date: SQLCipher $VERSION"
   exit 0
 fi

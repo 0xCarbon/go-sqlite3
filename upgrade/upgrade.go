@@ -1,6 +1,9 @@
 //go:build !cgo && upgrade && ignore
 // +build !cgo,upgrade,ignore
 
+// 0xCarbon fork: DO NOT RUN. This regenerates a plain-SQLite amalgamation
+// and would clobber the fork's SQLCipher binding (see upgrade/sqlcipher.sh).
+// Kept only to stay close to upstream.
 package main
 
 import (

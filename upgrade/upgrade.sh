@@ -1,5 +1,9 @@
 #!/bin/sh
 
+# 0xCarbon fork: DO NOT RUN. This regenerates a plain-SQLite amalgamation and
+# would clobber the fork's SQLCipher binding (see upgrade/sqlcipher.sh).
+# Kept only to stay close to upstream.
+
 set -e
 
 cd "$(dirname "$0")/.."

@@ -15,7 +15,9 @@ if [ -z "$CURRENT_VERSION" ]; then
   exit 1
 fi
 
-LATEST_VERSION=$(git ls-remote --tags --sort=-v:refname \
+# --refs: without it the peeled annotated-tag refs (refs/tags/vX.Y.Z^{})
+# match the glob and version-sort above the plain tags.
+LATEST_VERSION=$(git ls-remote --tags --refs --sort=-v:refname \
   https://github.com/sqlcipher/sqlcipher 'v4.*' \
   | head -n 1 \
   | sed 's|.*refs/tags/||;s|^v||')
