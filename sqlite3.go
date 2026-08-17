@@ -1663,13 +1663,13 @@ func (d *SQLiteDriver) Open(dsn string) (driver.Conn, error) {
 		}
 
 		if rv != C.SQLITE_OK {
-			C.sqlite3_close_v2(db)
-			return nil, lastError(db)
+			// Capture the error before fail() closes the handle; reading
+			// sqlite3_errmsg after sqlite3_close_v2 is undefined.
+			return fail(lastError(db))
 		}
 	case d.EncryptionKey != "":
 		if err := exec(fmt.Sprintf("PRAGMA key = %s;", d.EncryptionKey)); err != nil {
-			C.sqlite3_close_v2(db)
-			return nil, err
+			return fail(err)
 		}
 	}
 
