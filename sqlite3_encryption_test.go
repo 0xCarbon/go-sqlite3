@@ -14,6 +14,7 @@ import (
 	"database/sql/driver"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -501,8 +502,9 @@ func TestStripKeyParam(t *testing.T) {
 		{"a=1&%5Fkey=abcd&b=2", "a=1&b=2"},
 		{"_key", ""},
 		{"%5Fkey", ""},
-		{"x_key=abcd", "x_key=abcd"},
-		{"a%5Fkey=abcd", "a%5Fkey=abcd"},
+		// _key-suffixed spellings are treated as the key parameter and stripped.
+		{"x_key=abcd", ""},
+		{"a%5Fkey=abcd", ""},
 		{"ke%79=1", "ke%79=1"},
 		{"", ""},
 	}
@@ -569,4 +571,305 @@ func TestDSNKey_ParamErrorAfterDecode(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "Invalid _mutex") {
 		t.Fatalf("got %v, want Invalid _mutex error", err)
 	}
+}
+
+func TestDSNKey_Spellings(t *testing.T) {
+	requireCodec(t)
+	key := []byte("0123456789abcdef0123456789abcdef")
+	wrong := []byte("ffffffffffffffffffffffffffffffff")
+	// NOTE: subtest names must not contain raw % spellings: t.TempDir()
+	// embeds the sanitized name in the path and SQLite percent-decodes
+	// file: URI paths, which would redirect the open to a nonexistent
+	// directory.
+	spellings := []struct{ label, raw string }{
+		{"upper", "_KEY"},
+		{"mixed", "_Key"},
+		{"pct-upper", "%5FKEY"},
+		{"pct-lower", "%5fkey"},
+	}
+	for _, sp := range spellings {
+		name := sp.raw
+		t.Run("file-uri/"+sp.label, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "t.db")
+			uri := "file:" + path + "?" + name + "=" + hex.EncodeToString(key)
+			db, err := sql.Open("sqlite3", uri)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec("CREATE TABLE t (v TEXT); INSERT INTO t VALUES ('s')"); err != nil {
+				t.Fatalf("spelling %s: %v", name, err)
+			}
+			db.Close()
+			// Reopen with the canonical spelling must read it.
+			db2, err := sql.Open("sqlite3", path+"?_key="+hex.EncodeToString(key))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var v string
+			if err := db2.QueryRow("SELECT v FROM t").Scan(&v); err != nil {
+				t.Fatalf("reopen via canonical _key after %s: %v", name, err)
+			}
+			db2.Close()
+			// Wrong key must fail.
+			bad, err := sql.Open("sqlite3", path+"?_key="+hex.EncodeToString(wrong))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := bad.Ping(); err == nil {
+				bad.Close()
+				t.Fatalf("wrong key accepted after spelling %s", name)
+			}
+			bad.Close()
+			// Plain open must not read it.
+			plain, _ := sql.Open("sqlite3", path)
+			if _, err := plain.Query("SELECT v FROM t"); err == nil {
+				plain.Close()
+				t.Fatalf("plain open read DB keyed via %s", name)
+			}
+			plain.Close()
+		})
+	}
+
+	t.Run("doubled-question", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "t.db")
+		db, err := sql.Open("sqlite3", path+"??_key="+hex.EncodeToString(key))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec("CREATE TABLE t (v TEXT)"); err != nil {
+			t.Fatalf("??_key spelling: %v", err)
+		}
+		db.Close()
+		plain, _ := sql.Open("sqlite3", path)
+		if _, err := plain.Query("SELECT v FROM t"); err == nil {
+			plain.Close()
+			t.Fatal("plain open read DB keyed via ??_key spelling")
+		}
+		plain.Close()
+	})
+
+	t.Run("duplicate-across-spellings", func(t *testing.T) {
+		db, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "t.db")+
+			"?_key="+hex.EncodeToString(key)+"&_KEY="+hex.EncodeToString(key))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		if _, err := db.Query("SELECT 1"); err == nil || !strings.Contains(err.Error(), "Invalid _key: duplicate") {
+			t.Fatalf("got %v, want duplicate-values error", err)
+		}
+	})
+}
+
+func TestDSNKey_MisspellingRefusedWithoutCodec(t *testing.T) {
+	if codecAvailable(t) {
+		t.Skip("codec available in this build; refusal path not reachable")
+	}
+	key := []byte("0123456789abcdef0123456789abcdef")
+	db, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "t.db")+"?_KEY="+hex.EncodeToString(key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Query("SELECT 1"); err == nil || !strings.Contains(err.Error(), "SQLCipher codec not available") {
+		t.Fatalf("got %v, want codec-unavailable refusal for misspelled _key", err)
+	}
+}
+
+func TestDSNKey_SQLiteNativeKeyParamsRejected(t *testing.T) {
+	dir := t.TempDir()
+	for _, q := range []string{
+		"key=passphrase", "hexkey=0102", "textkey=pass", "KEY=pass", "HexKey=0102", "TEXTKEY=pass",
+	} {
+		db, err := sql.Open("sqlite3", "file:"+filepath.Join(dir, "t.db")+"?"+q)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Query("SELECT 1"); err == nil || !strings.Contains(err.Error(), "is not supported") {
+			t.Fatalf("file: DSN with %q: got %v, want rejection", q, err)
+		}
+		db.Close()
+	}
+	// A benign file: parameter is untouched.
+	db, err := sql.Open("sqlite3", "file:"+filepath.Join(dir, "ok.db")+"?cache=shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("CREATE TABLE t (v TEXT)"); err != nil {
+		t.Fatalf("benign file: param rejected: %v", err)
+	}
+	db.Close()
+	// Non-file DSNs never reach SQLite's URI parser: key=junk there is an
+	// ordinary (ignored, stripped) query parameter, not a keying attempt.
+	plain, err := sql.Open("sqlite3", filepath.Join(dir, "p.db")+"?key=junk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := plain.Exec("CREATE TABLE t (v TEXT)"); err != nil {
+		t.Fatalf("plain DSN with key= param failed: %v", err)
+	}
+	plain.Close()
+}
+
+func TestDSNEmptyPathRejected(t *testing.T) {
+	dir := t.TempDir()
+	key := []byte("0123456789abcdef0123456789abcdef")
+	db, err := sql.Open("sqlite3", "?_key="+hex.EncodeToString(key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Query("SELECT 1"); err == nil || !strings.Contains(err.Error(), "missing database path") {
+		t.Fatalf("got %v, want missing-database-path error", err)
+	}
+	db.Close()
+	// No file may have been created anywhere with the key hex in its name.
+	entries, readErr := os.ReadDir(".")
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	_ = dir
+	_ = entries
+	if _, err := os.Stat("?_key=" + hex.EncodeToString(key)); err == nil {
+		t.Fatal("plaintext file named after the key hex was created")
+	}
+}
+
+func TestDSNKey_TooLongRejected(t *testing.T) {
+	db, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "t.db")+"?_key="+strings.Repeat("ab", 200))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Query("SELECT 1"); err == nil || !strings.Contains(err.Error(), "Invalid _key: too long") {
+		t.Fatalf("got %v, want Invalid _key: too long", err)
+	}
+}
+
+func TestBackupAfterCloseNoPanic(t *testing.T) {
+	tempDir := t.TempDir()
+	srcPath := filepath.Join(tempDir, "src.db")
+	dstPath := filepath.Join(tempDir, "dst.db")
+
+	src, err := sql.Open("sqlite3", srcPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Close()
+	if _, err := src.Exec("CREATE TABLE t (v TEXT); INSERT INTO t VALUES ('x')"); err != nil {
+		t.Fatal(err)
+	}
+
+	dst := sql.OpenDB(&testConnector{d: &SQLiteDriver{}, dsn: dstPath})
+	defer dst.Close()
+	srcC := sql.OpenDB(&testConnector{d: &SQLiteDriver{}, dsn: srcPath})
+	defer srcC.Close()
+
+	// Grab the raw conns to run a backup.
+	var backup *SQLiteBackup
+	dstConn, err := dst.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dstConn.Close()
+	srcConn, err := srcC.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srcConn.Close()
+	err = dstConn.Raw(func(dc any) error {
+		return srcConn.Raw(func(sc any) error {
+			var berr error
+			backup, berr = dc.(*SQLiteConn).Backup("main", sc.(*SQLiteConn), "main")
+			return berr
+		})
+	})
+	if err != nil {
+		t.Fatalf("backup init: %v", err)
+	}
+	if _, err := backup.Step(-1); err != nil {
+		t.Fatalf("backup step: %v", err)
+	}
+	if err := backup.Close(); err != nil {
+		t.Fatalf("backup close: %v", err)
+	}
+
+	// After Close the handle is nil: these must not SIGSEGV.
+	if _, err := backup.Step(1); err == nil || err.(Error).Code != ErrMisuse {
+		t.Fatalf("Step after Close: got %v, want ErrMisuse", err)
+	}
+	if backup.Remaining() != 0 {
+		t.Fatal("Remaining after Close: want 0")
+	}
+	if backup.PageCount() != 0 {
+		t.Fatal("PageCount after Close: want 0")
+	}
+	// Double Close must stay safe (finish on NULL is a no-op upstream of
+	// the guard as well; Close is idempotent via b.b == nil).
+	if err := backup.Close(); err != nil {
+		t.Logf("second close: %v", err)
+	}
+}
+
+// TestSQLCipherExportRoundTrip covers the consumers' documented decrypt and
+// rekey path: ATTACH a second database with a raw key and sqlcipher_export
+// into it. The destination must be readable only with its own key.
+func TestSQLCipherExportRoundTrip(t *testing.T) {
+	requireCodec(t)
+	dir := t.TempDir()
+	srcPath := filepath.Join(dir, "src.db")
+	dstPath := filepath.Join(dir, "dst.db")
+	srcKey := []byte("0123456789abcdef0123456789abcdef")
+	dstKey := []byte("fedcba9876543210fedcba9876543210")
+
+	src := openWithKeyBytes(t, srcPath, srcKey)
+	if _, err := src.Exec(`CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT);
+		INSERT INTO t (v) VALUES ('a'), ('b'), ('c')`); err != nil {
+		t.Fatal(err)
+	}
+	// The attach key must be a quoted SQL string containing the x'...'
+	// raw-key form; a bare blob literal silently falls back to key
+	// derivation (see the fork README).
+	stmt := fmt.Sprintf("ATTACH DATABASE ? AS dst KEY ?")
+	if _, err := src.Exec(stmt, dstPath, "x'"+hex.EncodeToString(dstKey)+"'"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := src.Exec("SELECT sqlcipher_export('dst')"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := src.Exec("DETACH DATABASE dst"); err != nil {
+		t.Fatal(err)
+	}
+	if err := src.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Destination must be encrypted and readable only with dstKey.
+	plain, err := sql.Open("sqlite3", dstPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := plain.Query("SELECT COUNT(*) FROM t"); err == nil {
+		plain.Close()
+		t.Fatal("plain open unexpectedly read the exported database")
+	}
+	plain.Close()
+
+	dst := openWithKeyBytes(t, dstPath, dstKey)
+	var n int
+	if err := dst.QueryRow("SELECT COUNT(*) FROM t").Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 3 {
+		t.Fatalf("got %d rows, want 3", n)
+	}
+	var v string
+	if err := dst.QueryRow("SELECT v FROM t WHERE id = 2").Scan(&v); err != nil {
+		t.Fatal(err)
+	}
+	if v != "b" {
+		t.Fatalf("got %q, want %q", v, "b")
+	}
+	dst.Close()
 }
